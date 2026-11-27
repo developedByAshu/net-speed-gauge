@@ -17,8 +17,17 @@ use objc2_foundation::{NSPoint, NSString};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::cell::RefCell;
 
-const CARD_WIDTH: i32 = 216;
-const CARD_HEIGHT: i32 = 124;
+// The card's numbers at full size. It scales from the same menu text size as the right-click menu.
+const CARD_WIDTH: f64 = 216.0;
+const CARD_SIDE: f64 = 16.0;
+const CARD_TOP: f64 = 12.0;
+const CARD_BOTTOM: f64 = 11.0;
+const CARD_ABOVE_DIVIDER: f64 = 9.0;
+const CARD_BELOW_DIVIDER: f64 = 10.0;
+const CARD_FIGURE_STEP: f64 = 4.0;
+const CARD_ARROW_GAP: f64 = 10.0;
+// The total is this many points over the rows' text size, and the arrows the same size as it.
+const CARD_VALUE_POINTS_ABOVE: f64 = 4.0;
 const CORNER_RADIUS: f32 = 9.0;
 // The menu's numbers at full size. It draws them at MENU_SCALE when its text is the default size, and in
 // proportion to the text size otherwise, the same as Juice Bar's menu.
@@ -138,18 +147,60 @@ impl MenuMetrics {
     }
 }
 
-struct PopupFonts {
+/// The card's fonts and sizes for one text size. Lengths scale like the menu's; each line steps down by
+/// its font's own height, so the large total never clips at any size.
+struct CardMetrics {
     small: Font,
     value: Font,
     arrow: Font,
+    width: i32,
+    height: i32,
+    side: i32,
+    top: i32,
+    divider_y: i32,
+    second_block_y: i32,
+    first_figure: i32,
+    second_figure: i32,
+    arrow_gap: i32,
 }
 
-impl PopupFonts {
-    fn new() -> Self {
+impl CardMetrics {
+    fn new(font_points: i64, totals: &Totals) -> Self {
+        let points = font_points.clamp(7, 12) as f64;
+        let scale = MENU_SCALE * points / MENU_FONT_POINTS_DEFAULT as f64;
+        let length = |value: f64| (value * scale).round() as i32;
+        let small = Font::system(points - HEADER_POINTS_BELOW, WEIGHT_REGULAR);
+        let value = Font::system(points + CARD_VALUE_POINTS_ABOVE, WEIGHT_SEMIBOLD);
+        let arrow = Font::system(points, WEIGHT_BOLD);
+        let block = small.box_height + value.box_height;
+        let top = length(CARD_TOP);
+        let divider_y = top + block + length(CARD_ABOVE_DIVIDER);
+        let second_block_y = divider_y + length(CARD_BELOW_DIVIDER);
+        let step = length(CARD_FIGURE_STEP);
+        let (side, arrow_gap) = (length(CARD_SIDE), length(CARD_ARROW_GAP));
+        // Wide enough for the larger total, a gap, an arrow and the widest single figure.
+        let figures = [totals.today_up, totals.today_down, totals.month_up, totals.month_down];
+        let widest_figure = figures.iter().map(|bytes| canvas::text_width(&format_bytes(*bytes), &small)).max().unwrap_or(0);
+        let widest_total = [totals.today_up + totals.today_down, totals.month_up + totals.month_down]
+            .iter()
+            .map(|bytes| canvas::text_width(&format_bytes(*bytes), &value))
+            .chain([canvas::text_width("This month", &small)])
+            .max()
+            .unwrap_or(0);
+        let needed = side * 2 + widest_total + length(NAME_GAP) + canvas::text_width(ARROW_DOWN, &arrow) + arrow_gap + widest_figure;
         Self {
-            small: Font::system(9.0, WEIGHT_REGULAR),
-            value: Font::system(14.0, WEIGHT_SEMIBOLD),
-            arrow: Font::system(10.0, WEIGHT_BOLD),
+            width: length(CARD_WIDTH).max(needed),
+            height: second_block_y + block + length(CARD_BOTTOM),
+            first_figure: step,
+            second_figure: step + small.box_height + step,
+            small,
+            value,
+            arrow,
+            side,
+            top,
+            divider_y,
+            second_block_y,
+            arrow_gap,
         }
     }
 }
@@ -181,7 +232,7 @@ enum PopupHost {
 struct Popup {
     host: PopupHost,
     view: Retained<GaugeView>,
-    fonts: PopupFonts,
+    card: CardMetrics,
     theme: Theme,
     width: i32,
     height: i32,
@@ -222,17 +273,16 @@ impl Popup {
         (0..MENU_ITEMS.len()).find(|&row| y >= self.menu.row_top(row) && y < self.menu.row_top(row) + self.menu.row_height)
     }
 
-    /// Draws the labelled download and upload totals used by both popups.
+    /// Draws the labelled download and upload totals on the card.
     fn draw_totals(&self, y: i32, label: &str, up: u64, down: u64, arrow_right: i32) {
-        let theme = self.theme;
-        let left = 16;
-        let right = self.width - 16;
-        canvas::text(left, y, label, &self.fonts.small, theme.muted, Align::Left);
-        canvas::text(left, y + 16, &format_bytes(up + down), &self.fonts.value, theme.text, Align::Left);
+        let (theme, card) = (self.theme, &self.card);
+        let right = self.width - card.side;
+        canvas::text(card.side, y, label, &card.small, theme.muted, Align::Left);
+        canvas::text(card.side, y + card.small.box_height, &format_bytes(up + down), &card.value, theme.text, Align::Left);
         let (upload, download) = figure_colors(&theme, theme.surface);
-        for (arrow, color, bytes, row_y) in [(ARROW_DOWN, download, down, y + 4), (ARROW_UP, upload, up, y + 24)] {
-            canvas::text(right, row_y, &format_bytes(bytes), &self.fonts.small, theme.text, Align::Right);
-            canvas::text(arrow_right, row_y, arrow, &self.fonts.arrow, color, Align::Right);
+        for (arrow, color, bytes, row_y) in [(ARROW_DOWN, download, down, y + card.first_figure), (ARROW_UP, upload, up, y + card.second_figure)] {
+            canvas::text(right, row_y, &format_bytes(bytes), &card.small, theme.text, Align::Right);
+            canvas::text(arrow_right, row_y, arrow, &card.arrow, color, Align::Right);
         }
     }
 
@@ -248,13 +298,14 @@ impl Popup {
             // Every arrow shares one column, set by the widest number, so they line up at any speed.
             let widest = [totals.today_up, totals.today_down, totals.month_up, totals.month_down]
                 .iter()
-                .map(|bytes| canvas::text_width(&format_bytes(*bytes), &self.fonts.small))
+                .map(|bytes| canvas::text_width(&format_bytes(*bytes), &self.card.small))
                 .max()
                 .unwrap_or(0);
-            let arrow_right = self.width - 16 - widest - 10;
-            self.draw_totals(12, "Today", totals.today_up, totals.today_down, arrow_right);
-            canvas::round_rect(16, 62, self.width - 32, 1, 0.0, theme.border);
-            self.draw_totals(72, "This month", totals.month_up, totals.month_down, arrow_right);
+            let card = &self.card;
+            let arrow_right = self.width - card.side - widest - card.arrow_gap;
+            self.draw_totals(card.top, "Today", totals.today_up, totals.today_down, arrow_right);
+            canvas::round_rect(card.side, card.divider_y, self.width - card.side * 2, 1, 0.0, theme.border);
+            self.draw_totals(card.second_block_y, "This month", totals.month_up, totals.month_down, arrow_right);
             return;
         }
         let menu = &self.menu;
@@ -388,11 +439,11 @@ pub fn on_window_closed(window: &NSWindow) {
     }
 }
 
-fn popup_size(is_menu: bool, menu: &MenuMetrics) -> (i32, i32) {
+fn popup_size(is_menu: bool, menu: &MenuMetrics, card: &CardMetrics) -> (i32, i32) {
     if is_menu {
         (menu.width, menu.height())
     } else {
-        (CARD_WIDTH, CARD_HEIGHT)
+        (card.width, card.height)
     }
 }
 
@@ -400,16 +451,20 @@ fn menu_metrics(totals: &Totals) -> MenuMetrics {
     MenuMetrics::new(MENU_FONT_POINTS.load(Ordering::Relaxed), totals)
 }
 
+fn card_metrics(totals: &Totals) -> CardMetrics {
+    CardMetrics::new(MENU_FONT_POINTS.load(Ordering::Relaxed), totals)
+}
+
 /// Opens a popup just under the menu bar item.
 fn open(store: &UsageStore, is_menu: bool, is_pinned: bool) {
     close();
     let totals = read_totals(store);
-    let menu = menu_metrics(&totals);
-    let (width, height) = popup_size(is_menu, &menu);
+    let (menu, card) = (menu_metrics(&totals), card_metrics(&totals));
+    let (width, height) = popup_size(is_menu, &menu, &card);
     let takes_focus = is_menu || is_pinned;
     let (window, view) = surface::create_popup(width, height);
     app::place_below_item(&window);
-    let popup = new_popup(PopupHost::Window(window.clone()), view.clone(), current_theme(), (width, height), totals, (is_menu, is_pinned), menu);
+    let popup = new_popup(PopupHost::Window(window.clone()), view.clone(), current_theme(), (width, height), totals, (is_menu, is_pinned), (menu, card));
     OPEN_POPUP.with(|cell| *cell.borrow_mut() = Some(popup));
     if takes_focus {
         surface::show_with_focus(&window, &view);
@@ -418,9 +473,9 @@ fn open(store: &UsageStore, is_menu: bool, is_pinned: bool) {
     }
 }
 
-fn new_popup(host: PopupHost, view: Retained<GaugeView>, theme: Theme, size: (i32, i32), totals: Totals, (is_menu, is_pinned): (bool, bool), menu: MenuMetrics) -> Popup {
+fn new_popup(host: PopupHost, view: Retained<GaugeView>, theme: Theme, size: (i32, i32), totals: Totals, (is_menu, is_pinned): (bool, bool), (menu, card): (MenuMetrics, CardMetrics)) -> Popup {
     let (width, height) = size;
-    Popup { host, view, fonts: PopupFonts::new(), theme, width, height, totals, is_menu, is_pinned, hover_row: None, menu }
+    Popup { host, view, card, theme, width, height, totals, is_menu, is_pinned, hover_row: None, menu }
 }
 
 /// Places the Mac's own menu just under the menu bar item, with its right edge at the end of the selected background.
@@ -463,8 +518,11 @@ pub fn fill_system_menu(store: &UsageStore, is_menu: bool) {
     close();
     let menu = system_menu();
     let totals = read_totals(store);
-    let metrics = menu_metrics(&totals);
-    let (width, height) = popup_size(is_menu, &metrics);
+    let (metrics, card) = (menu_metrics(&totals), card_metrics(&totals));
+    let (width, height) = popup_size(is_menu, &metrics, &card);
+    // macOS never makes a menu bar item's menu narrower than the item, and the readout is wide. The drawn
+    // popup takes that width too, so it always fills the menu with no empty band; its right edge follows.
+    let width = width.max(app::anchor_frame().size.width.ceil() as i32);
     let view = GaugeView::create(surface::Surface::Popup, width, height);
     let item = NSMenuItem::new(main_thread());
     item.setView(Some(&view));
@@ -473,7 +531,7 @@ pub fn fill_system_menu(store: &UsageStore, is_menu: bool) {
     if is_menu {
         add_shortcut_items(&menu);
     }
-    let popup = new_popup(PopupHost::SystemMenu(menu), view, current_theme(), (width, height), totals, (is_menu, !is_menu), metrics);
+    let popup = new_popup(PopupHost::SystemMenu(menu), view, current_theme(), (width, height), totals, (is_menu, !is_menu), (metrics, card));
     OPEN_POPUP.with(|cell| *cell.borrow_mut() = Some(popup));
 }
 
@@ -598,6 +656,35 @@ pub fn capture(path: &str) -> bool {
     let mut view = None;
     with_popup(|popup| view = Some(popup.view.clone()));
     view.is_some_and(|view| surface::capture_view(&view, path))
+}
+
+/// Logs the open popup's window width against its drawn view's and paints the window to a PNG, for capture mode.
+pub fn capture_live_window(path: &str) {
+    let mut view = None;
+    with_popup(|popup| view = Some(popup.view.clone()));
+    let Some(view) = view else {
+        eprintln!("capture: no popup is open");
+        return;
+    };
+    let Some(window) = view.window() else {
+        eprintln!("capture: the popup has no window");
+        return;
+    };
+    eprintln!("capture: menu bar item {:.1} wide", app::anchor_frame().size.width);
+    let frame = window.frame();
+    let in_window = view.convertRect_toView(view.bounds(), None);
+    eprintln!(
+        "capture: window {:.1} x {:.1}, drawn view {:.1} x {:.1} at x {:.1}, empty band on the right {:.1}",
+        frame.size.width,
+        frame.size.height,
+        in_window.size.width,
+        in_window.size.height,
+        in_window.origin.x,
+        frame.size.width - (in_window.origin.x + in_window.size.width)
+    );
+    if let Some(content) = window.contentView() {
+        eprintln!("capture: saved {path}: {}", surface::capture_view(&content, path));
+    }
 }
 
 /// Shows the open popup in a chosen theme, for checks.

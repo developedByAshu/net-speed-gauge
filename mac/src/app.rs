@@ -16,6 +16,7 @@ use objc2::sel;
 use objc2_app_kit::{NSAppearance, NSAppearanceCustomization, NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSEventMask, NSStatusBar, NSStatusItem};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
 use std::time::Instant;
@@ -451,7 +452,8 @@ pub fn on_system_menu_opening() {
         }
     });
     if let Some((usage, _)) = shared_state() {
-        popup_ui::fill_system_menu(&usage.borrow(), surface::current_event_asks_for_menu());
+        let is_menu = surface::current_event_asks_for_menu() || CAPTURE_WANTS_MENU.load(Ordering::Relaxed);
+        popup_ui::fill_system_menu(&usage.borrow(), is_menu);
     }
 }
 
@@ -542,6 +544,38 @@ pub fn finish_startup() {
         app.redraw();
     });
     surface::watch_for_sleep();
+    start_capture_if_asked();
+}
+
+// Capture mode opens the right-click menu rather than the card.
+static CAPTURE_WANTS_MENU: AtomicBool = AtomicBool::new(false);
+const CAPTURE_OPEN_SECONDS: f64 = 2.0;
+const CAPTURE_FINISH_SECONDS: f64 = 5.0;
+
+/// Capture mode, for checking the real menu window without touching the mouse: NETSPEEDGAUGE_CAPTURE=menu or
+/// card pops that popup from the menu bar item as the Mac shows it, writes NETSPEEDGAUGE_CAPTURE_PATH, logs the
+/// window's width against the drawn view's, and quits.
+fn start_capture_if_asked() {
+    let wanted = std::env::var("NETSPEEDGAUGE_CAPTURE").unwrap_or_default();
+    if wanted != "menu" && wanted != "card" {
+        return;
+    }
+    CAPTURE_WANTS_MENU.store(wanted == "menu", Ordering::Relaxed);
+    surface::start_timer(CAPTURE_OPEN_SECONDS, sel!(captureOpen:), false);
+    surface::start_timer(CAPTURE_FINISH_SECONDS, sel!(captureFinish:), false);
+}
+
+/// Pops the Mac's own menu from the menu bar item. Used only by capture mode.
+pub fn capture_open() {
+    open_item_menu();
+}
+
+/// Writes the open popup's window to a PNG, logs its sizes, closes it and quits. Used only by capture mode.
+pub fn capture_finish() {
+    let path = std::env::var("NETSPEEDGAUGE_CAPTURE_PATH").unwrap_or_default();
+    popup_ui::capture_live_window(&path);
+    popup_ui::close();
+    NSApplication::sharedApplication(main_thread()).terminate(None);
 }
 
 /// Returns true while a window the user opened on purpose is showing. A hovered window comes and goes too quickly.

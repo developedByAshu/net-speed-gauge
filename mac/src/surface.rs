@@ -293,6 +293,16 @@ define_class!(
     }
 
     impl AppDelegate {
+        #[unsafe(method(captureOpen:))]
+        fn capture_open(&self, _timer: &NSTimer) {
+            app::capture_open();
+        }
+
+        #[unsafe(method(captureFinish:))]
+        fn capture_finish(&self, _timer: &NSTimer) {
+            app::capture_finish();
+        }
+
         #[unsafe(method(resetDoneExpired:))]
         fn reset_done_expired(&self, _timer: &NSTimer) {
             settings_ui::hide_reset_done();
