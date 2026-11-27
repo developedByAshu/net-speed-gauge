@@ -9,7 +9,9 @@ use crate::surface::{self, GaugeView, Surface, KEY_ESCAPE, WINDOW_LEVEL_FLOATING
 use crate::theme::{apply_title_bar, current_theme, dark_theme, draw_made_with_love, light_theme, set_theme_choice, Theme};
 use netspeedgauge_shared::settings::{Field, Settings, COLOR_AUTO, FIELDS, PALETTE};
 use objc2::rc::Retained;
+use objc2::sel;
 use objc2_app_kit::NSWindow;
+use objc2_foundation::NSTimer;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -44,6 +46,17 @@ const SEGMENT_PADDING: i32 = 8;
 const CONTROL_SPACE: i32 = 8;
 const STEPPER_WIDTH: i32 = 136;
 const SWATCH_ROW_WIDTH: i32 = 270;
+const CONFIRM_WIDTH: i32 = 400;
+const CONFIRM_HEIGHT: i32 = 184;
+const BUTTON_HEIGHT: i32 = 30;
+const RESET_DONE_SECONDS: f64 = 4.0;
+const ICON_RESET: &str = "arrow.counterclockwise";
+const ICON_DONE: &str = "checkmark.circle.fill";
+// The done cue's green and the confirm button's red, the same as Juice Bar's.
+const GOOD_DARK: u32 = 0x30D158;
+const GOOD_LIGHT: u32 = 0x248A3D;
+const DANGER_DARK: u32 = 0xE5484D;
+const DANGER_LIGHT: u32 = 0xD93A3F;
 
 /// The pages in the sidebar, with their icon and title.
 const PAGES: [(&str, &str); 6] = [
@@ -107,6 +120,7 @@ const APPEARANCE_ROWS: &[Row] = &[
     Row::Section("Text"),
     setting(Field::FontFamily, "Font", "", Kind::Segments(&["System", "Menlo", "SF Mono", "Helvetica"])),
     setting(Field::FontPoints, "Size", "", Kind::Stepper { step: 1, suffix: " pt" }),
+    setting(Field::MenuFontPoints, "Menu text size", "", Kind::Stepper { step: 1, suffix: " pt" }),
     setting(Field::TextColor, "Colour", "", Kind::Swatches { auto_label: "A" }),
     setting(Field::SwapRows, "Download first", "Swaps the two speeds", Kind::Toggle),
     Row::ToggleSection { title: "Icons", field: Field::ShowIcons },
@@ -197,6 +211,8 @@ enum Action {
     ToggleAdapter(u64),
     ResetPage,
     ResetAll,
+    ConfirmReset,
+    CancelReset,
 }
 
 #[derive(Clone, Copy)]
@@ -238,7 +254,11 @@ struct SettingsWindow {
     hits: Vec<HitArea>,
     hover: Option<Action>,
     adapters: Vec<(u64, String)>,
-    is_confirming_reset: bool,
+    /// The reset waiting on the confirm card, if it is showing.
+    confirming: Option<Action>,
+    /// The reset just done, whose row shows a green line for a few seconds.
+    reset_done: Option<Action>,
+    done_timer: Option<Retained<NSTimer>>,
 }
 
 thread_local! {
@@ -280,6 +300,54 @@ impl SettingsWindow {
         canvas::text(SIDEBAR_WIDTH + MARGIN - 4, 20, PAGES[self.page].1, &self.fonts.title, theme.text, Align::Left);
         self.draw_sidebar();
         self.draw_scrollbar();
+        if let Some(reset) = self.confirming {
+            self.draw_confirm_card(reset);
+        }
+    }
+
+    fn good_color(&self) -> u32 {
+        if self.theme.is_dark { GOOD_DARK } else { GOOD_LIGHT }
+    }
+
+    fn danger_color(&self) -> u32 {
+        if self.theme.is_dark { DANGER_DARK } else { DANGER_LIGHT }
+    }
+
+    /// Draws a button whose right edge is at `right` and returns its width.
+    fn draw_card_button(&mut self, right: i32, y: i32, label: &str, (fill, text): (u32, u32), action: Action) -> i32 {
+        let width = canvas::text_width(label, &self.fonts.body) + 28;
+        canvas::round_rect(right - width, y, width, BUTTON_HEIGHT, CARD_RADIUS as f32, fill);
+        canvas::text(right - width / 2, y + 5, label, &self.fonts.body, text, Align::Center);
+        self.add_hit(right - width, y, width, BUTTON_HEIGHT, action);
+        width
+    }
+
+    /// Dims the window and asks about a reset on a card in the middle, as Juice Bar does. Only its two buttons take clicks.
+    fn draw_confirm_card(&mut self, reset: Action) {
+        let theme = self.theme;
+        let danger = self.danger_color();
+        self.hits.clear();
+        canvas::fade_round_rect(0, 0, WIDTH, HEIGHT, 0.0, 0x000000, if theme.is_dark { 0.5 } else { 0.25 });
+        let (x, y) = ((WIDTH - CONFIRM_WIDTH) / 2, (HEIGHT - CONFIRM_HEIGHT) / 2 - 20);
+        let radius = (CARD_RADIUS + 4) as f32;
+        canvas::round_rect(x - 1, y - 1, CONFIRM_WIDTH + 2, CONFIRM_HEIGHT + 2, radius + 1.0, theme.border);
+        canvas::round_rect(x, y, CONFIRM_WIDTH, CONFIRM_HEIGHT, radius, theme.card);
+        let (tile_x, tile_y) = (x + 20, y + 20);
+        canvas::round_rect(tile_x, tile_y, LOCK_TILE, LOCK_TILE, (CARD_RADIUS + 2) as f32, mix(theme.card, danger, 0.16));
+        canvas::symbol(tile_x + LOCK_TILE / 2, tile_y + LOCK_TILE / 2, ICON_RESET, 13.0, danger);
+        let (title, detail) = reset_wording(reset);
+        let text_x = tile_x + LOCK_TILE + 12;
+        canvas::text(text_x, tile_y + 1, title, &self.fonts.strong, theme.text, Align::Left);
+        canvas::text(text_x, tile_y + 21, "This cannot be undone", &self.fonts.small, theme.muted, Align::Left);
+        for (position, line) in detail.iter().enumerate() {
+            canvas::text(x + 20, y + 76 + position as i32 * 20, line, &self.fonts.body, theme.text, Align::Left);
+        }
+        let button_y = y + CONFIRM_HEIGHT - 20 - BUTTON_HEIGHT;
+        let right = x + CONFIRM_WIDTH - 20;
+        let reset_fill = if self.is_hover(Action::ConfirmReset) { mix(danger, 0x000000, 0.12) } else { danger };
+        let reset_width = self.draw_card_button(right, button_y, "Reset", (reset_fill, 0xFFFFFF), Action::ConfirmReset);
+        let cancel_fill = if self.is_hover(Action::CancelReset) { theme.button_hover } else { theme.button };
+        self.draw_card_button(right - reset_width - 10, button_y, "Cancel", (cancel_fill, theme.text), Action::CancelReset);
     }
 
     fn draw_sidebar(&mut self) {
@@ -402,12 +470,15 @@ impl SettingsWindow {
                 y + 46
             }
             Row::ResetPage => {
-                self.draw_button_row(left, y, width, "Appearance and units", "Back to how NetSpeedGauge started", "Reset", Action::ResetPage);
+                let hint = self.reset_hint(Action::ResetPage, "Back to how NetSpeedGauge started");
+                self.draw_button_row(left, y, width, "Appearance and units", hint, "Reset", Action::ResetPage);
+                self.draw_done_cue(left, y, Action::ResetPage);
                 next
             }
             Row::ResetAll => {
-                let button = if self.is_confirming_reset { "Click to confirm" } else { "Reset all" };
-                self.draw_button_row(left, y, width, "Every setting", "Usage history is kept", button, Action::ResetAll);
+                let hint = self.reset_hint(Action::ResetAll, "Usage history is kept");
+                self.draw_button_row(left, y, width, "Every setting", hint, "Reset all", Action::ResetAll);
+                self.draw_done_cue(left, y, Action::ResetAll);
                 next
             }
             Row::AboutCard => {
@@ -436,6 +507,22 @@ impl SettingsWindow {
                 next
             }
         }
+    }
+
+    /// Returns a reset row's hint. While the done line takes its place it is blank, which keeps the label up top.
+    fn reset_hint(&self, reset: Action, hint: &'static str) -> &'static str {
+        if self.reset_done == Some(reset) { " " } else { hint }
+    }
+
+    /// Draws the green "done" line under a reset row's label for a few seconds after that reset.
+    fn draw_done_cue(&self, left: i32, y: i32, reset: Action) {
+        if self.reset_done != Some(reset) {
+            return;
+        }
+        let good = self.good_color();
+        let text = if reset == Action::ResetAll { "Done. Every setting is back to its default." } else { "Done. Back to how NetSpeedGauge started." };
+        canvas::symbol(left + 20, y + 27 + self.fonts.small.box_height / 2, ICON_DONE, 8.0, good);
+        canvas::text(left + 30, y + 27, text, &self.fonts.small, good, Align::Left);
     }
 
     /// Draws the top of the privacy card: a lock on a tinted tile, its promise, and a dividing line.
@@ -635,8 +722,6 @@ impl SettingsWindow {
         let Some(action) = self.action_at(x, y) else {
             return;
         };
-        let was_confirming = self.is_confirming_reset;
-        self.is_confirming_reset = false;
         match action {
             Action::Page(page) => {
                 self.page = page;
@@ -663,27 +748,39 @@ impl SettingsWindow {
                 }
                 self.commit();
             }
-            Action::ResetPage => {
+            Action::ResetPage | Action::ResetAll => {
+                // Both resets ask first, on a card inside this window.
+                self.confirming = Some(action);
+                self.reset_done = None;
+                self.hover = None;
+                self.invalidate();
+            }
+            Action::CancelReset => {
+                self.confirming = None;
+                self.invalidate();
+            }
+            Action::ConfirmReset => {
+                let Some(reset) = self.confirming.take() else {
+                    return;
+                };
                 {
                     let mut settings = self.settings.borrow_mut();
-                    for field in page_fields(APPEARANCE_PAGE).into_iter().chain(page_fields(UNITS_PAGE)) {
-                        settings.reset(field);
-                    }
-                }
-                self.commit();
-            }
-            Action::ResetAll => {
-                if was_confirming {
-                    {
-                        let mut settings = self.settings.borrow_mut();
+                    if reset == Action::ResetAll {
                         FIELDS.iter().for_each(|spec| settings.reset(spec.field));
                         settings.chosen_adapters.clear();
+                    } else {
+                        for field in page_fields(APPEARANCE_PAGE).into_iter().chain(page_fields(UNITS_PAGE)) {
+                            settings.reset(field);
+                        }
                     }
-                    self.commit();
-                } else {
-                    self.is_confirming_reset = true;
-                    self.invalidate();
                 }
+                self.reset_done = Some(reset);
+                self.hover = None;
+                let timer = surface::start_timer(RESET_DONE_SECONDS, sel!(resetDoneExpired:), false);
+                if let Some(old) = self.done_timer.replace(timer) {
+                    old.invalidate();
+                }
+                self.commit();
             }
         }
     }
@@ -730,16 +827,62 @@ pub fn on_click(x: i32, y: i32) {
 /// Scrolls the page by the distance the trackpad or wheel reports.
 pub fn on_scroll(delta: i32) {
     with_window(|state| {
+        if state.confirming.is_some() {
+            return;
+        }
         let limit = (state.content_height - (HEIGHT - HEADER_HEIGHT)).max(0);
         state.scroll = (state.scroll - delta).clamp(0, limit);
         state.invalidate();
     });
 }
 
+/// Escape closes the confirm card if it is up, or else the window.
 pub fn on_key(code: u16) {
-    if code == KEY_ESCAPE {
+    if code != KEY_ESCAPE {
+        return;
+    }
+    let mut was_confirming = false;
+    with_window(|state| {
+        was_confirming = state.confirming.take().is_some();
+        state.invalidate();
+    });
+    if !was_confirming {
         app::post(Command::CloseSettings);
     }
+}
+
+/// Hides the reset done line a few seconds after a reset.
+pub fn hide_reset_done() {
+    with_window(|state| {
+        state.reset_done = None;
+        state.done_timer = None;
+        state.invalidate();
+    });
+}
+
+/// Clicks the area with an action, for checks: "reset_page", "reset_all", "confirm_reset" or "cancel_reset".
+/// Returns false when no such area is showing.
+pub fn click_reset_for_checks(name: &str) -> bool {
+    let wanted = match name {
+        "reset_page" => Action::ResetPage,
+        "reset_all" => Action::ResetAll,
+        "confirm_reset" => Action::ConfirmReset,
+        "cancel_reset" => Action::CancelReset,
+        _ => return false,
+    };
+    let mut position = None;
+    with_window(|state| position = state.hits.iter().find(|hit| hit.action == wanted).map(|hit| (hit.x + hit.width / 2, hit.y + hit.height / 2)));
+    if let Some((x, y)) = position {
+        on_click(x, y);
+    }
+    position.is_some()
+}
+
+/// Returns (the reset waiting on the card, the reset whose done line shows), for checks.
+pub fn reset_state_for_checks() -> (bool, bool) {
+    let mut state_now = (false, false);
+    with_window(|state| state_now = (state.confirming.is_some(), state.reset_done.is_some()));
+    state_now
 }
 
 /// Frees the window's state once it has closed.
@@ -820,7 +963,9 @@ pub fn open(settings: Rc<RefCell<Settings>>, keep_on_top: bool) {
         hits: Vec::new(),
         hover: None,
         adapters,
-        is_confirming_reset: false,
+        confirming: None,
+        reset_done: None,
+        done_timer: None,
     };
     OPEN_WINDOW.with(|cell| *cell.borrow_mut() = Some(state));
     app::sync_dock_entry();
@@ -871,6 +1016,15 @@ pub fn click_setting_for_checks(field: Field, value: i64) -> bool {
         on_click(x, y);
     }
     position.is_some()
+}
+
+/// Returns a reset's card title and its two lines of detail.
+fn reset_wording(reset: Action) -> (&'static str, [&'static str; 2]) {
+    if reset == Action::ResetAll {
+        ("Reset every setting?", ["Every choice goes back to how NetSpeedGauge started.", "Your usage history is kept."])
+    } else {
+        ("Reset appearance and units?", ["Theme, text, icons, colours and units go back", "to how NetSpeedGauge started."])
+    }
 }
 
 /// Returns every label, hint or line that would run into its control or off its card, for checks.

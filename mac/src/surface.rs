@@ -287,6 +287,11 @@ define_class!(
     }
 
     impl AppDelegate {
+        #[unsafe(method(resetDoneExpired:))]
+        fn reset_done_expired(&self, _timer: &NSTimer) {
+            settings_ui::hide_reset_done();
+        }
+
         #[unsafe(method(pendingCommand:))]
         fn pending_command(&self, _timer: &NSTimer) {
             popup_ui::run_pending_command();
