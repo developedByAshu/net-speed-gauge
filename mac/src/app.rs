@@ -142,6 +142,7 @@ impl App {
         let settings = Settings::load();
         set_theme_choice(settings.get(Field::WindowTheme));
         set_icon_colors(settings.get(Field::UpColor), settings.get(Field::DownColor));
+        popup_ui::set_menu_font_points(settings.get(Field::MenuFontPoints));
         let format = settings.speed_format();
         let mode = settings.interface_mode();
         let mut counters = Vec::new();
@@ -290,6 +291,7 @@ impl App {
         self.update_timer();
         set_theme_choice(settings.get(Field::WindowTheme));
         set_icon_colors(settings.get(Field::UpColor), settings.get(Field::DownColor));
+        popup_ui::set_menu_font_points(settings.get(Field::MenuFontPoints));
         usage_ui::apply_theme();
         popup_ui::sync_system_menu_look();
         self.sync_item_menu();

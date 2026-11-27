@@ -132,6 +132,22 @@ pub fn text(x: i32, y: i32, text: &str, font: &Font, rgb: u32, align: Align) {
     let _: () = unsafe { msg_send![&*string, drawAtPoint: point, withAttributes: &*attributes] };
 }
 
+/// Draws one line of text whose ink, not its advance, ends exactly at `right`, so a column of different
+/// glyphs (a total, a comma, a Q) lines up to the pixel. `y` is the top of the line.
+pub fn text_ink_right(right: i32, y: i32, text: &str, font: &Font, rgb: u32) {
+    let string = NSString::from_str(text);
+    let attributes = attributes(font, rgb);
+    // Line fragment origin plus device metrics: the bounds of the drawn glyphs themselves.
+    let options: usize = 1 | 8;
+    let huge = NSSize::new(10_000.0, 10_000.0);
+    // SAFETY: both objects are valid, and a nil context is allowed.
+    let ink: NSRect = unsafe { msg_send![&*string, boundingRectWithSize: huge, options: options, attributes: &*attributes, context: std::ptr::null::<AnyObject>()] };
+    let left = f64::from(right) - (ink.origin.x + ink.size.width);
+    let point = NSPoint::new(left, f64::from(y) + font.nudge);
+    // SAFETY: both objects are valid, and this only runs while a view is being painted.
+    let _: () = unsafe { msg_send![&*string, drawAtPoint: point, withAttributes: &*attributes] };
+}
+
 /// Draws an SF Symbol centred on a point, at a size in Windows points.
 pub fn symbol(center_x: i32, center_y: i32, name: &str, points: f64, rgb: u32) {
     let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None) else {

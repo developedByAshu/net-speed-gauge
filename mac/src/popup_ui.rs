@@ -10,20 +10,34 @@ use crate::settings_ui;
 use netspeedgauge_shared::format::format_bytes;
 use netspeedgauge_shared::usage_store::{Period, UsageStore};
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::{sel, MainThreadOnly};
 use objc2_app_kit::{NSAppearanceCustomization, NSApplication, NSMenu, NSMenuItem, NSWindow};
-use objc2_foundation::NSPoint;
+use objc2_foundation::{NSPoint, NSString};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::cell::RefCell;
 
-const MENU_WIDTH: i32 = 164;
 const CARD_WIDTH: i32 = 216;
-const SUMMARY_HEIGHT: i32 = 34;
 const CARD_HEIGHT: i32 = 124;
-const ROW_HEIGHT: i32 = 32;
-const DIVIDER_HEIGHT: i32 = 9;
-const PADDING: i32 = 5;
 const CORNER_RADIUS: f32 = 9.0;
+// The menu's numbers at full size. It draws them at MENU_SCALE when its text is the default size, and in
+// proportion to the text size otherwise, the same as Juice Bar's menu.
+const MENU_WIDTH: f64 = 164.0;
+const SUMMARY_HEIGHT: f64 = 34.0;
+const ROW_HEIGHT: f64 = 32.0;
+const DIVIDER_HEIGHT: f64 = 9.0;
+const PADDING: f64 = 5.0;
+const HOVER_RADIUS: f64 = 5.0;
 const ICON_POINTS: f64 = 10.0;
+const ICON_CENTER_X: f64 = 22.0;
+const LABEL_X: f64 = 40.0;
+const SIDE_INSET: f64 = 14.0;
+// The least space between a row's label and its shortcut, or between "Today" and its total.
+const NAME_GAP: f64 = 24.0;
+const MENU_SCALE: f64 = 0.8;
+const MENU_FONT_POINTS_DEFAULT: i64 = 9;
+// The header is one point under the rows' text.
+const HEADER_POINTS_BELOW: f64 = 1.0;
 // The Mac's own panels, measured on Weather, start one point above the bottom of the menu bar.
 const MENU_OVERLAP_WITH_BAR: f64 = 1.0;
 // The selected background ends 1 point past the item, and 2 more makes the rounded corner look lined up with it.
@@ -31,17 +45,100 @@ const MENU_PAST_ITEM: f64 = 3.0;
 const ARROW_UP: &str = "\u{2191}";
 const ARROW_DOWN: &str = "\u{2193}";
 
-/// One thing the menu can do, with its icon, label and the work it asks for.
-const MENU_ITEMS: [(&str, &str, Command); 3] = [
-    ("chart.bar", "Usage", Command::OpenUsage(OpenedBy::Menu)),
-    ("gearshape", "Settings", Command::OpenSettings),
-    ("power", "Quit", Command::Quit),
+/// One thing the menu can do: its icon, label, the work it asks for, and its key with Command (none for Usage).
+const MENU_ITEMS: [(&str, &str, Command, &str); 3] = [
+    ("chart.bar", "Usage", Command::OpenUsage(OpenedBy::Menu), ""),
+    ("gearshape", "Settings", Command::OpenSettings, ","),
+    ("power", "Quit", Command::Quit, "q"),
 ];
 const QUIT_ROW: usize = 2;
 
-struct PopupFonts {
+// The menu's text size, set by the app from the settings whenever they change.
+static MENU_FONT_POINTS: AtomicI64 = AtomicI64::new(MENU_FONT_POINTS_DEFAULT);
+
+/// Sets the right-click menu's text size, in points.
+pub fn set_menu_font_points(points: i64) {
+    MENU_FONT_POINTS.store(points, Ordering::Relaxed);
+}
+
+/// Returns the shortcut as the menu shows it, such as "⌘,".
+fn shortcut_label(key: &str) -> String {
+    if key.is_empty() {
+        String::new()
+    } else {
+        format!("\u{2318}{}", key.to_uppercase())
+    }
+}
+
+/// The menu's fonts and sizes for one text size. Every length is the full size one scaled by the same factor.
+struct MenuMetrics {
     body: Font,
     strong: Font,
+    small: Font,
+    width: i32,
+    summary_height: i32,
+    row_height: i32,
+    divider_height: i32,
+    padding: i32,
+    hover_radius: f32,
+    icon_points: f64,
+    icon_center_x: i32,
+    label_x: i32,
+    label_top: i32,
+    header_top: i32,
+    total_top: i32,
+    side_inset: i32,
+}
+
+impl MenuMetrics {
+    fn new(font_points: i64, totals: &Totals) -> Self {
+        let points = font_points.clamp(7, 12) as f64;
+        let scale = MENU_SCALE * points / MENU_FONT_POINTS_DEFAULT as f64;
+        let length = |value: f64| (value * scale).round() as i32;
+        let body = Font::system(points, WEIGHT_REGULAR);
+        let strong = Font::system(points, WEIGHT_SEMIBOLD);
+        let small = Font::system(points - HEADER_POINTS_BELOW, WEIGHT_REGULAR);
+        let (summary_height, row_height) = (length(SUMMARY_HEIGHT), length(ROW_HEIGHT));
+        let (label_x, side_inset, gap) = (length(LABEL_X), length(SIDE_INSET), length(NAME_GAP));
+        // Wide enough for the longest label and its shortcut, and for "Today" and its total, each with the gap.
+        let rows = MENU_ITEMS
+            .iter()
+            .map(|(_, label, _, key)| label_x + canvas::text_width(label, &strong) + gap + canvas::text_width(&shortcut_label(key), &body) + side_inset)
+            .max()
+            .unwrap_or(0);
+        let header = side_inset * 2 + canvas::text_width("Today", &small) + gap + canvas::text_width(&format_bytes(totals.today_up + totals.today_down), &strong);
+        Self {
+            width: length(MENU_WIDTH).max(rows).max(header),
+            label_top: (row_height - body.box_height) / 2,
+            header_top: (summary_height - small.box_height) / 2,
+            total_top: (summary_height - strong.box_height) / 2,
+            body,
+            strong,
+            small,
+            summary_height,
+            row_height,
+            divider_height: length(DIVIDER_HEIGHT),
+            padding: length(PADDING),
+            hover_radius: (HOVER_RADIUS * scale) as f32,
+            icon_points: ICON_POINTS * scale,
+            icon_center_x: length(ICON_CENTER_X),
+            label_x,
+            side_inset,
+        }
+    }
+
+    /// Returns the y position of a menu row. Quit sits under a divider.
+    fn row_top(&self, row: usize) -> i32 {
+        let divider = if row >= QUIT_ROW { self.divider_height } else { 0 };
+        self.summary_height + self.padding + row as i32 * self.row_height + divider
+    }
+
+    fn height(&self) -> i32 {
+        self.summary_height + self.padding * 2 + self.row_height * MENU_ITEMS.len() as i32 + self.divider_height
+    }
+}
+
+struct PopupFonts {
     small: Font,
     value: Font,
     arrow: Font,
@@ -50,8 +147,6 @@ struct PopupFonts {
 impl PopupFonts {
     fn new() -> Self {
         Self {
-            body: Font::system(10.0, WEIGHT_REGULAR),
-            strong: Font::system(10.0, WEIGHT_SEMIBOLD),
             small: Font::system(9.0, WEIGHT_REGULAR),
             value: Font::system(14.0, WEIGHT_SEMIBOLD),
             arrow: Font::system(10.0, WEIGHT_BOLD),
@@ -95,6 +190,7 @@ struct Popup {
     // A card opened by a click stays until the next click, here or anywhere else.
     is_pinned: bool,
     hover_row: Option<usize>,
+    menu: MenuMetrics,
 }
 
 thread_local! {
@@ -114,12 +210,6 @@ fn with_popup(action: impl FnOnce(&mut Popup)) {
     });
 }
 
-/// Returns the y position of a menu row. Quit sits under a divider.
-fn row_top(row: usize) -> i32 {
-    let divider = if row >= QUIT_ROW { DIVIDER_HEIGHT } else { 0 };
-    SUMMARY_HEIGHT + PADDING + row as i32 * ROW_HEIGHT + divider
-}
-
 impl Popup {
     fn is_held_by(&self, window: &NSWindow) -> bool {
         matches!(&self.host, PopupHost::Window(held) if std::ptr::eq(&**held, window))
@@ -129,7 +219,7 @@ impl Popup {
         if !self.is_menu {
             return None;
         }
-        (0..MENU_ITEMS.len()).find(|&row| y >= row_top(row) && y < row_top(row) + ROW_HEIGHT)
+        (0..MENU_ITEMS.len()).find(|&row| y >= self.menu.row_top(row) && y < self.menu.row_top(row) + self.menu.row_height)
     }
 
     /// Draws the labelled download and upload totals used by both popups.
@@ -167,22 +257,28 @@ impl Popup {
             self.draw_totals(72, "This month", totals.month_up, totals.month_down, arrow_right);
             return;
         }
+        let menu = &self.menu;
         let today_total = format_bytes(totals.today_up + totals.today_down);
-        canvas::text(14, 9, "Today", &self.fonts.small, theme.muted, Align::Left);
-        canvas::text(self.width - 14, 8, &today_total, &self.fonts.strong, theme.text, Align::Right);
-        let divider_width = self.width - PADDING * 2;
-        canvas::round_rect(PADDING, SUMMARY_HEIGHT, divider_width, 1, 0.0, theme.border);
-        for (row, (icon, label, _)) in MENU_ITEMS.iter().enumerate() {
-            let top = row_top(row);
+        // The total, the shortcuts and nothing else share one right edge, as in Juice Bar's menu.
+        let right = self.width - menu.side_inset;
+        canvas::text(menu.side_inset, menu.header_top, "Today", &menu.small, theme.muted, Align::Left);
+        canvas::text_ink_right(right, menu.total_top, &today_total, &menu.strong, theme.text);
+        let divider_width = self.width - menu.padding * 2;
+        canvas::round_rect(menu.padding, menu.summary_height, divider_width, 1, 0.0, theme.border);
+        for (row, (icon, label, _, key)) in MENU_ITEMS.iter().enumerate() {
+            let top = menu.row_top(row);
             let is_hover = self.hover_row == Some(row);
             if is_hover {
-                canvas::round_rect(PADDING, top, divider_width, ROW_HEIGHT, 5.0, mix(theme.surface, theme.text, 0.09));
+                canvas::round_rect(menu.padding, top, divider_width, menu.row_height, menu.hover_radius, mix(theme.surface, theme.text, 0.09));
             }
-            canvas::symbol(22, top + ROW_HEIGHT / 2, icon, ICON_POINTS, if is_hover { theme.text } else { theme.muted });
-            let font = if is_hover { &self.fonts.strong } else { &self.fonts.body };
-            canvas::text(40, top + 7, label, font, theme.text, Align::Left);
+            canvas::symbol(menu.icon_center_x, top + menu.row_height / 2, icon, menu.icon_points, if is_hover { theme.text } else { theme.muted });
+            let font = if is_hover { &menu.strong } else { &menu.body };
+            canvas::text(menu.label_x, top + menu.label_top, label, font, theme.text, Align::Left);
+            if !key.is_empty() {
+                canvas::text_ink_right(right, top + menu.label_top, &shortcut_label(key), &menu.body, theme.muted);
+            }
         }
-        canvas::round_rect(PADDING, row_top(QUIT_ROW) - (DIVIDER_HEIGHT / 2 + 1), divider_width, 1, 0.0, theme.border);
+        canvas::round_rect(menu.padding, menu.row_top(QUIT_ROW) - (menu.divider_height / 2 + 1), divider_width, 1, 0.0, theme.border);
     }
 
     fn invalidate(&self) {
@@ -292,23 +388,28 @@ pub fn on_window_closed(window: &NSWindow) {
     }
 }
 
-fn popup_size(is_menu: bool) -> (i32, i32) {
+fn popup_size(is_menu: bool, menu: &MenuMetrics) -> (i32, i32) {
     if is_menu {
-        (MENU_WIDTH, SUMMARY_HEIGHT + PADDING * 2 + ROW_HEIGHT * MENU_ITEMS.len() as i32 + DIVIDER_HEIGHT)
+        (menu.width, menu.height())
     } else {
         (CARD_WIDTH, CARD_HEIGHT)
     }
+}
+
+fn menu_metrics(totals: &Totals) -> MenuMetrics {
+    MenuMetrics::new(MENU_FONT_POINTS.load(Ordering::Relaxed), totals)
 }
 
 /// Opens a popup just under the menu bar item.
 fn open(store: &UsageStore, is_menu: bool, is_pinned: bool) {
     close();
     let totals = read_totals(store);
-    let (width, height) = popup_size(is_menu);
+    let menu = menu_metrics(&totals);
+    let (width, height) = popup_size(is_menu, &menu);
     let takes_focus = is_menu || is_pinned;
     let (window, view) = surface::create_popup(width, height);
     app::place_below_item(&window);
-    let popup = new_popup(PopupHost::Window(window.clone()), view.clone(), current_theme(), (width, height), totals, is_menu, is_pinned);
+    let popup = new_popup(PopupHost::Window(window.clone()), view.clone(), current_theme(), (width, height), totals, (is_menu, is_pinned), menu);
     OPEN_POPUP.with(|cell| *cell.borrow_mut() = Some(popup));
     if takes_focus {
         surface::show_with_focus(&window, &view);
@@ -317,9 +418,9 @@ fn open(store: &UsageStore, is_menu: bool, is_pinned: bool) {
     }
 }
 
-fn new_popup(host: PopupHost, view: Retained<GaugeView>, theme: Theme, size: (i32, i32), totals: Totals, is_menu: bool, is_pinned: bool) -> Popup {
+fn new_popup(host: PopupHost, view: Retained<GaugeView>, theme: Theme, size: (i32, i32), totals: Totals, (is_menu, is_pinned): (bool, bool), menu: MenuMetrics) -> Popup {
     let (width, height) = size;
-    Popup { host, view, fonts: PopupFonts::new(), theme, width, height, totals, is_menu, is_pinned, hover_row: None }
+    Popup { host, view, fonts: PopupFonts::new(), theme, width, height, totals, is_menu, is_pinned, hover_row: None, menu }
 }
 
 /// Places the Mac's own menu just under the menu bar item, with its right edge at the end of the selected background.
@@ -361,14 +462,56 @@ pub fn sync_system_menu_look() {
 pub fn fill_system_menu(store: &UsageStore, is_menu: bool) {
     close();
     let menu = system_menu();
-    let (width, height) = popup_size(is_menu);
+    let totals = read_totals(store);
+    let metrics = menu_metrics(&totals);
+    let (width, height) = popup_size(is_menu, &metrics);
     let view = GaugeView::create(surface::Surface::Popup, width, height);
     let item = NSMenuItem::new(main_thread());
     item.setView(Some(&view));
     menu.removeAllItems();
     menu.addItem(&item);
-    let popup = new_popup(PopupHost::SystemMenu(menu), view, current_theme(), (width, height), read_totals(store), is_menu, !is_menu);
+    if is_menu {
+        add_shortcut_items(&menu);
+    }
+    let popup = new_popup(PopupHost::SystemMenu(menu), view, current_theme(), (width, height), totals, (is_menu, !is_menu), metrics);
     OPEN_POPUP.with(|cell| *cell.borrow_mut() = Some(popup));
+}
+
+/// Adds a hidden item for each row with a shortcut, so ⌘, and ⌘Q work while the menu is open. The drawn
+/// view shows the rows; these only answer the keys.
+fn add_shortcut_items(menu: &NSMenu) {
+    for (row, (_, label, _, key)) in MENU_ITEMS.iter().enumerate().filter(|(_, item)| !item.3.is_empty()) {
+        // SAFETY: the delegate answers menuShortcut: and lives for the whole app.
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(main_thread()), &NSString::from_str(label), Some(sel!(menuShortcut:)), &NSString::from_str(key))
+        };
+        let target = surface::delegate();
+        let target: &AnyObject = target.as_ref();
+        // SAFETY: as above.
+        unsafe { item.setTarget(Some(target)) };
+        item.setTag(row as isize);
+        item.setHidden(true);
+        item.setAllowsKeyEquivalentWhenHidden(true);
+        menu.addItem(&item);
+    }
+}
+
+/// Runs a menu row from its shortcut, the same as clicking it.
+pub fn on_shortcut(row: isize) {
+    if let Ok(row) = usize::try_from(row) {
+        if row < MENU_ITEMS.len() {
+            choose(row);
+        }
+    }
+}
+
+/// Runs a menu row from Command and a key pressed in a menu shown in a window, as the Mac's own menu does.
+pub fn on_command_key(key: &str) {
+    let mut is_menu = false;
+    with_popup(|popup| is_menu = popup.is_menu);
+    if let Some(row) = MENU_ITEMS.iter().position(|item| is_menu && !item.3.is_empty() && item.3.eq_ignore_ascii_case(key)) {
+        choose(row);
+    }
 }
 
 /// Forgets the popup once the Mac's own menu has closed, and runs what a row asked for just after.

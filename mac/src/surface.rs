@@ -168,8 +168,14 @@ define_class!(
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let code = event.keyCode();
+            let is_command = event.modifierFlags().contains(NSEventModifierFlags::Command);
             match self.ivars().surface {
                 Surface::Readout => {}
+                Surface::Popup if is_command => {
+                    if let Some(key) = event.charactersIgnoringModifiers() {
+                        popup_ui::on_command_key(&key.to_string());
+                    }
+                }
                 Surface::Popup => popup_ui::on_key(code),
                 Surface::Usage => usage_ui::on_key(code),
                 Surface::Settings => settings_ui::on_key(code),
@@ -290,6 +296,12 @@ define_class!(
         #[unsafe(method(resetDoneExpired:))]
         fn reset_done_expired(&self, _timer: &NSTimer) {
             settings_ui::hide_reset_done();
+        }
+
+        #[unsafe(method(menuShortcut:))]
+        fn menu_shortcut(&self, sender: &NSMenuItem) {
+            popup_ui::on_shortcut(sender.tag());
+            app::flush_commands();
         }
 
         #[unsafe(method(pendingCommand:))]
