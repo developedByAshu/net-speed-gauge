@@ -59,11 +59,38 @@ fn main() {
         popup_ui::show_menu(&usage.borrow());
         assert!(popup_ui::capture(&path(&format!("menu_{theme}"))));
         popup_ui::close();
+        // The menu at its smallest, default and largest text sizes, plain and with Settings selected.
+        for points in [7, 9, 12] {
+            popup_ui::set_menu_font_points(points);
+            popup_ui::show_menu(&usage.borrow());
+            let plain = path(&format!("menu_{points}pt_{theme}"));
+            assert!(popup_ui::capture(&plain));
+            popup_ui::on_key(surface::KEY_DOWN);
+            popup_ui::on_key(surface::KEY_DOWN);
+            assert!(popup_ui::capture(&path(&format!("menu_{points}pt_{theme}_hover"))));
+            popup_ui::close();
+            app::flush_commands();
+            let edges = right_column_edges(&plain);
+            println!("menu {points} pt {theme}: right column ink ends at pixels {edges:?}");
+            assert!(edges.len() >= 3 && edges.windows(2).all(|pair| pair[0] == pair[1]), "the total and shortcuts must share one right edge");
+        }
+        popup_ui::set_menu_font_points(9);
 
         settings_ui::open(settings.clone(), false);
         for (page, name) in ["general", "appearance", "units", "network", "advanced", "details"].iter().enumerate() {
             settings_ui::show_page_for_checks(page);
             assert!(settings_ui::capture(&path(&format!("settings_{name}_{theme}"))));
+        }
+        // Both resets ask on a card, then show a green done line.
+        for name in ["reset_page", "reset_all"] {
+            settings_ui::show_page_for_checks(4);
+            settings_ui::capture(&path("_measure"));
+            assert!(settings_ui::click_reset_for_checks(name));
+            assert!(settings_ui::capture(&path(&format!("settings_{name}_confirm_{theme}"))));
+            assert!(settings_ui::click_reset_for_checks("confirm_reset"));
+            app::flush_commands();
+            assert!(settings_ui::capture(&path(&format!("settings_{name}_done_{theme}"))));
+            settings_ui::hide_reset_done();
         }
         settings_ui::show_page_for_checks(1);
         settings_ui::capture(&path("_measure"));
@@ -85,6 +112,43 @@ fn main() {
     let _ = std::fs::remove_file(path("_measure"));
     let _ = std::fs::remove_dir_all(&home);
     println!("captured to {output}");
+}
+
+/// Returns where the ink ends in each band of lines with ink in a PNG's right third. Bands one or two
+/// pixels tall are divider lines, which run the full width, so they are skipped.
+#[cfg(target_os = "macos")]
+fn right_column_edges(path: &str) -> Vec<isize> {
+    use objc2_app_kit::NSBitmapImageRep;
+    use objc2_foundation::{NSData, NSString};
+    let data = NSData::dataWithContentsOfFile(&NSString::from_str(path)).expect("png");
+    let image = NSBitmapImageRep::imageRepWithData(&data).expect("bitmap");
+    let (wide, high) = (image.pixelsWide(), image.pixelsHigh());
+    // The middle of the menu, clear of its rounded edge, is the surface colour.
+    let background = image.colorAtX_y(wide / 2, high - 4).expect("pixel");
+    let is_ink = |x: isize, y: isize| {
+        let pixel = image.colorAtX_y(x, y).expect("pixel");
+        (pixel.redComponent() - background.redComponent()).abs() + (pixel.greenComponent() - background.greenComponent()).abs() + (pixel.blueComponent() - background.blueComponent()).abs()
+            > 0.25
+    };
+    // Stay inside the 1 point border the window menu draws round itself.
+    let (column, last) = (wide * 2 / 3, wide - 3);
+    let mut edges = Vec::new();
+    let mut band: Option<(isize, isize)> = None;
+    for y in 3..=high - 3 {
+        let right = if y < high - 3 { (column..last).rev().find(|&x| is_ink(x, y)) } else { None };
+        match (right, band) {
+            (Some(x), Some((edge, tall))) => band = Some((edge.max(x + 1), tall + 1)),
+            (Some(x), None) => band = Some((x + 1, 1)),
+            (None, Some((edge, tall))) => {
+                if tall > 2 {
+                    edges.push(edge);
+                }
+                band = None;
+            }
+            (None, None) => {}
+        }
+    }
+    edges
 }
 
 #[cfg(not(target_os = "macos"))]

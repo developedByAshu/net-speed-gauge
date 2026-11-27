@@ -149,6 +149,62 @@ mod flow {
         expect(saved.contains("hide_suffix=1"), "the choice should be saved")
     }
 
+    fn resets_ask_on_a_card_then_show_a_done_line() -> Result<(), String> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        app::post(app::Command::OpenSettings);
+        app::flush_commands();
+        let (_, settings) = app::state_for_checks().expect("started");
+        for name in ["reset_page", "reset_all"] {
+            settings.borrow_mut().set(Field::HideSuffix, 1);
+            settings_ui::show_page_for_checks(4);
+            settings_ui::capture(&format!("{home}/reset.png"));
+            expect(settings_ui::click_reset_for_checks(name), "the reset button should be clickable")?;
+            settings_ui::capture(&format!("{home}/reset.png"));
+            expect(settings_ui::reset_state_for_checks() == (true, false), "a reset should ask on the card first")?;
+            expect(settings.borrow().is_on(Field::HideSuffix), "asking must not reset anything yet")?;
+            expect(settings_ui::click_reset_for_checks("cancel_reset"), "Cancel should be clickable")?;
+            expect(settings_ui::reset_state_for_checks() == (false, false), "Cancel should close the card")?;
+            expect(settings.borrow().is_on(Field::HideSuffix), "Cancel must keep the settings")?;
+            settings_ui::capture(&format!("{home}/reset.png"));
+            settings_ui::click_reset_for_checks(name);
+            settings_ui::capture(&format!("{home}/reset.png"));
+            expect(settings_ui::click_reset_for_checks("confirm_reset"), "Reset should be clickable")?;
+            app::flush_commands();
+            expect(!settings.borrow().is_on(Field::HideSuffix), "confirming should reset the units")?;
+            expect(settings_ui::reset_state_for_checks() == (false, true), "a done line should show after the reset")?;
+            settings_ui::hide_reset_done();
+        }
+        settings_ui::close();
+        Ok(())
+    }
+
+    fn escape_closes_the_reset_card_before_the_window() -> Result<(), String> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        app::post(app::Command::OpenSettings);
+        app::flush_commands();
+        settings_ui::show_page_for_checks(4);
+        settings_ui::capture(&format!("{home}/reset.png"));
+        settings_ui::click_reset_for_checks("reset_all");
+        settings_ui::on_key(surface::KEY_ESCAPE);
+        app::flush_commands();
+        expect(settings_ui::is_open() && settings_ui::reset_state_for_checks() == (false, false), "Escape should close only the card")?;
+        settings_ui::close();
+        Ok(())
+    }
+
+    fn menu_shortcuts_open_settings_and_live_in_the_mac_menu() -> Result<(), String> {
+        app::on_readout_right_click();
+        popup_ui::on_command_key(",");
+        app::flush_commands();
+        expect(settings_ui::is_open() && !popup_ui::is_open(), "Command comma should open Settings from the menu")?;
+        settings_ui::close();
+        let (usage, _) = app::state_for_checks().expect("started");
+        popup_ui::fill_system_menu(&usage.borrow(), true);
+        let keys: Vec<String> = popup_ui::system_menu().itemArray().iter().filter(|item| item.isHidden()).map(|item| item.keyEquivalent().to_string()).collect();
+        popup_ui::on_system_menu_closed();
+        expect(keys == [",", "q"], &format!("the Mac menu should hold hidden Command comma and Q items, found {keys:?}"))
+    }
+
     fn closing_then_reopening_works_many_times() -> Result<(), String> {
         set_action(Field::ClickAction, 2);
         for _ in 0..50 {
@@ -214,7 +270,7 @@ mod flow {
         NSApplication::sharedApplication(mtm).setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
         app::start_without_menu_bar_item();
 
-        let checks: [Check; 17] = [
+        let checks: [Check; 20] = [
             ("hover_does_nothing_by_default", hover_does_nothing_by_default),
             ("click_shows_the_card_by_default_and_second_click_closes_it", click_shows_the_card_by_default_and_second_click_closes_it),
             ("hover_card_closes_when_the_mouse_leaves", hover_card_closes_when_the_mouse_leaves),
@@ -232,6 +288,9 @@ mod flow {
             ("dock_entry_only_while_a_window_is_open_on_purpose", dock_entry_only_while_a_window_is_open_on_purpose),
             ("windows_open_just_below_the_item_and_stay_on_screen", windows_open_just_below_the_item_and_stay_on_screen),
             ("views_never_paint_outside_their_area", views_never_paint_outside_their_area),
+            ("resets_ask_on_a_card_then_show_a_done_line", resets_ask_on_a_card_then_show_a_done_line),
+            ("escape_closes_the_reset_card_before_the_window", escape_closes_the_reset_card_before_the_window),
+            ("menu_shortcuts_open_settings_and_live_in_the_mac_menu", menu_shortcuts_open_settings_and_live_in_the_mac_menu),
         ];
         let mut failed = 0;
         for (name, check) in checks {
