@@ -422,7 +422,10 @@ fn run_hover_action(window: HWND) {
     let action = settings.borrow().meter_action(Field::HoverAction);
     match action {
         MeterAction::Nothing => {}
-        MeterAction::Card => popup_ui::show_hover_card(&usage.borrow(), window),
+        MeterAction::Card => {
+            popup_ui::set_menu_font_points(settings.borrow().get(Field::MenuFontPoints));
+            popup_ui::show_hover_card(&usage.borrow(), window);
+        }
         // Passing over the numbers must not disturb anything already open.
         MeterAction::UsageWindow if usage_ui::opened_by().is_some() || popup_ui::is_open() => {}
         MeterAction::UsageWindow => open_usage(window, OpenedBy::Hover),
@@ -442,6 +445,7 @@ fn run_click_action(window: HWND) {
             if usage_ui::opened_by() == Some(OpenedBy::Hover) {
                 usage_ui::close();
             }
+            popup_ui::set_menu_font_points(settings.borrow().get(Field::MenuFontPoints));
             popup_ui::show_pinned_card(&usage.borrow(), window);
         }
         MeterAction::UsageWindow => match usage_ui::opened_by() {
@@ -458,7 +462,8 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
         WM_APP_RESYNC => with_app(App::sync_position),
         WM_SETTINGCHANGE => with_app(App::refresh_color),
         WM_RBUTTONUP => {
-            if let Some((usage, _)) = shared_state() {
+            if let Some((usage, settings)) = shared_state() {
+                popup_ui::set_menu_font_points(settings.borrow().get(Field::MenuFontPoints));
                 popup_ui::show_menu(&usage.borrow(), window);
             }
         }

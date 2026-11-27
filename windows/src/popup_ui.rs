@@ -7,7 +7,7 @@ use crate::messages::{WM_APP_EXIT, WM_APP_OPEN_SETTINGS, WM_APP_OPEN_USAGE, WM_A
 use crate::taskbar_dock::{find_taskbar, to_wide};
 use crate::theme::{apply_popup_frame, current_theme, figure_colors, Theme};
 use crate::usage_store::{Period, UsageStore};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -17,7 +17,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP,
+    GetKeyState, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, KillTimer, LoadCursorW, PostMessageW,
@@ -69,14 +69,16 @@ struct PopupFonts {
 }
 
 impl PopupFonts {
+    /// Text follows the menu text size (9 pt by default, 1 pt under the old 10), icons scale with the popup.
     fn new(dpi: u32) -> Self {
+        let points = MENU_POINTS.with(Cell::get) as f32;
         Self {
-            body: create_font("Segoe UI", 10.0, 400, dpi),
-            strong: create_font("Segoe UI Semibold", 10.0, 400, dpi),
-            small: create_font("Segoe UI", 9.0, 400, dpi),
-            value: create_font("Segoe UI Semibold", 14.0, 400, dpi),
-            icon: create_font("Segoe MDL2 Assets", 11.0, 400, dpi),
-            arrow: create_font("Segoe UI", 10.0, 900, dpi),
+            body: create_font("Segoe UI", points, 400, dpi),
+            strong: create_font("Segoe UI Semibold", points, 400, dpi),
+            small: create_font("Segoe UI", points - 1.0, 400, dpi),
+            value: create_font("Segoe UI Semibold", points + 4.0, 400, dpi),
+            icon: create_font("Segoe MDL2 Assets", 11.0 * menu_scale(), 400, dpi),
+            arrow: create_font("Segoe UI", points, 900, dpi),
         }
     }
 }
@@ -187,8 +189,9 @@ fn with_popup(action: impl FnOnce(&mut Popup)) {
 }
 
 impl Popup {
+    /// Scales a full-size length by the screen and the menu text size.
     fn px(&self, value: i32) -> i32 {
-        (value as f32 * self.dpi as f32 / BASE_DPI).round() as i32
+        (value as f32 * menu_scale() * self.dpi as f32 / BASE_DPI).round() as i32
     }
 
     /// Returns the y position of a menu row. Exit sits under a divider.
@@ -263,6 +266,8 @@ impl Popup {
             self.canvas.text(self.px(14), top + self.px(8), icon, self.fonts.icon, icon_color, Align::Left);
             let font = if is_hover { self.fonts.strong } else { self.fonts.body };
             self.canvas.text(self.px(40), top + self.px(7), label, font, theme.text, Align::Left);
+            // The shortcut ends on the same right edge as the total in the "Today" line.
+            self.canvas.text(self.width - self.px(14), top + self.px(8), MENU_SHORTCUTS[row], self.fonts.small, theme.muted, Align::Right);
         }
         let divider_y = self.row_top(EXIT_ROW) - self.px(DIVIDER_HEIGHT / 2 + 1);
         self.canvas.round_rect(divider_x, divider_y, divider_width, self.px(1).max(1), 0.0, theme.border);
@@ -347,6 +352,30 @@ impl Popup {
 
 const WM_APP_CLOSE_POPUP: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 20;
 
+// The popups are 80% of their full size at the default menu text size, and grow and shrink with it,
+// the same rule as the Mac app and Juice Bar.
+const MENU_SCALE: f32 = 0.8;
+const MENU_FONT_POINTS_DEFAULT: i64 = 9;
+// The least space between a row's label and its shortcut, or between "Today" and its total.
+const NAME_GAP: i32 = 24;
+// Shortcuts shown on the right of the menu rows, and taken while the menu is open. Usage has none.
+const MENU_SHORTCUTS: [&str; 3] = ["", "Ctrl+,", "Ctrl+Q"];
+const KEY_COMMA: u16 = 0xBC;
+
+thread_local! {
+    static MENU_POINTS: Cell<i64> = const { Cell::new(MENU_FONT_POINTS_DEFAULT) };
+}
+
+/// Sets the menu text size, 7 to 12 points, from Settings. Both click popups scale from it.
+pub fn set_menu_font_points(points: i64) {
+    MENU_POINTS.with(|cell| cell.set(points.clamp(7, 12)));
+}
+
+/// Returns how much of its full size a popup draws at: 80% at the default text size.
+pub fn menu_scale() -> f32 {
+    MENU_SCALE * MENU_POINTS.with(Cell::get) as f32 / MENU_FONT_POINTS_DEFAULT as f32
+}
+
 /// Handles the popup's messages.
 unsafe extern "system" fn popup_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
@@ -411,6 +440,12 @@ unsafe extern "system" fn popup_proc(window: HWND, message: u32, wparam: WPARAM,
                 VK_RETURN => with_popup(|popup| {
                     if let Some(row) = popup.hover_row {
                         popup.choose(row);
+                    }
+                }),
+                // The shortcuts shown on the rows work while the menu is open.
+                key if GetKeyState(i32::from(VK_CONTROL)) < 0 && (key == KEY_COMMA || key == u16::from(b'Q')) => with_popup(|popup| {
+                    if popup.is_menu {
+                        popup.choose(if key == KEY_COMMA { 1 } else { EXIT_ROW });
                     }
                 }),
                 _ => {}
@@ -482,12 +517,24 @@ fn open(store: &UsageStore, anchor: HWND, is_menu: bool, is_pinned: bool) {
         };
         RegisterClassW(&class);
         let dpi = GetDpiForWindow(anchor).max(BASE_DPI as u32);
-        let scale = |value: i32| (value as f32 * dpi as f32 / BASE_DPI).round() as i32;
-        let (width, height) = (scale(if is_menu { MENU_WIDTH } else { CARD_WIDTH }), scale(base_height));
+        let screen = |value: i32| (value as f32 * dpi as f32 / BASE_DPI).round() as i32;
+        let scale = |value: i32| (value as f32 * menu_scale() * dpi as f32 / BASE_DPI).round() as i32;
+        let fonts = PopupFonts::new(dpi);
+        let measure = Canvas::new(1, 1);
+        let width = if is_menu {
+            // Wide enough for each label and its shortcut, and for "Today" and its total, each with the gap.
+            let today = format_bytes(totals.today_up + totals.today_down);
+            let summary = scale(14) + measure.text_width("Today", fonts.small) + scale(NAME_GAP) + measure.text_width(&today, fonts.strong) + scale(14);
+            let rows = MENU_ITEMS.iter().zip(MENU_SHORTCUTS).map(|((_, label, _), key)| scale(40) + measure.text_width(label, fonts.strong) + scale(NAME_GAP) + measure.text_width(key, fonts.small) + scale(14)).max().unwrap_or(0);
+            scale(MENU_WIDTH).max(summary).max(rows)
+        } else {
+            scale(CARD_WIDTH)
+        };
+        let height = scale(base_height);
         let mut anchor_area = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         GetWindowRect(anchor, &mut anchor_area);
         let x = anchor_area.right - width;
-        let resting_y = anchor_area.top - height - scale(GAP_ABOVE_TASKBAR);
+        let resting_y = anchor_area.top - height - screen(GAP_ABOVE_TASKBAR);
         // It starts with its top edge inside the taskbar, so nothing shows until it slides up.
         let slide_distance = if animations_enabled() { anchor_area.top - resting_y } else { 0 };
         // Only a popup that takes focus can tell when the user clicks somewhere else.
@@ -513,7 +560,7 @@ fn open(store: &UsageStore, anchor: HWND, is_menu: bool, is_pinned: bool) {
             window,
             anchor,
             canvas: Canvas::new(width, height),
-            fonts: PopupFonts::new(dpi),
+            fonts,
             theme,
             dpi,
             width,
