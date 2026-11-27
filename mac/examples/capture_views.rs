@@ -74,6 +74,14 @@ fn main() {
             println!("menu {points} pt {theme}: right column ink ends at pixels {edges:?}");
             assert!(edges.len() >= 3 && edges.windows(2).all(|pair| pair[0] == pair[1]), "the total and shortcuts must share one right edge");
         }
+        // The card follows the same text size as the menu.
+        for points in [7, 9, 12] {
+            popup_ui::set_menu_font_points(points);
+            popup_ui::show_hover_card(&usage.borrow());
+            assert!(popup_ui::capture(&path(&format!("card_{points}pt_{theme}"))));
+            popup_ui::close();
+            app::flush_commands();
+        }
         popup_ui::set_menu_font_points(9);
 
         settings_ui::open(settings.clone(), false);
