@@ -73,6 +73,8 @@ pub enum Field {
     ClickAction,
     ShowIcons,
     ShowBackground,
+    /// The right-click menu's text size. The readout's own size is FontPoints.
+    MenuFontPoints,
 }
 
 /// What resting on or clicking the numbers does.
@@ -101,7 +103,7 @@ const fn spec(field: Field, key: &'static str, default: i64, min: i64, max: i64)
 
 const MAX_COLOR: i64 = 0xFF_FFFF;
 
-pub const FIELDS: [FieldSpec; 32] = [
+pub const FIELDS: [FieldSpec; 33] = [
     spec(Field::ArrowStyle, "arrow_style", 0, 0, ARROW_STYLES.len() as i64 - 1),
     spec(Field::IconThickness, "icon_thickness", 2, THINNEST_ICON, 4),
     spec(Field::FontFamily, "font_family", 0, 0, 3),
@@ -134,6 +136,7 @@ pub const FIELDS: [FieldSpec; 32] = [
     spec(Field::ClickAction, "click_action", 1, 0, 2),
     spec(Field::ShowIcons, "show_icons", 1, 0, 1),
     spec(Field::ShowBackground, "show_background", 0, 0, 1),
+    spec(Field::MenuFontPoints, "menu_font_points", 9, 7, 12),
 ];
 
 /// All the user's choices.

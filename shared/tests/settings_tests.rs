@@ -44,6 +44,21 @@ fn values_are_kept_within_their_limits() {
 }
 
 #[test]
+fn menu_text_size_parses_clamps_and_round_trips() {
+    assert_eq!(Settings::default().get(Field::MenuFontPoints), 9);
+    assert_eq!(Settings::from_text("menu_font_points=11\n").get(Field::MenuFontPoints), 11);
+    assert_eq!(Settings::from_text("menu_font_points=2\n").get(Field::MenuFontPoints), 7);
+    assert_eq!(Settings::from_text("menu_font_points=40\n").get(Field::MenuFontPoints), 12);
+    assert_eq!(Settings::from_text("menu_font_points=big\n").get(Field::MenuFontPoints), 9);
+    let mut settings = Settings::default();
+    settings.set(Field::MenuFontPoints, 7);
+    settings.set(Field::FontPoints, 12);
+    let loaded = Settings::from_text(&settings.to_text());
+    assert_eq!(loaded.get(Field::MenuFontPoints), 7);
+    assert_eq!(loaded.get(Field::FontPoints), 12, "the menu size is separate from the readout size");
+}
+
+#[test]
 fn unit_choices_map_to_megabytes_and_megabits() {
     let mut settings = Settings::default();
     assert_eq!(settings.speed_format().unit, Unit::BytesDecimal);
