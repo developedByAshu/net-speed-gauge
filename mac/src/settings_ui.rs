@@ -120,7 +120,7 @@ const APPEARANCE_ROWS: &[Row] = &[
     Row::Section("Text"),
     setting(Field::FontFamily, "Font", "", Kind::Segments(&["System", "Menlo", "SF Mono", "Helvetica"])),
     setting(Field::FontPoints, "Size", "", Kind::Stepper { step: 1, suffix: " pt" }),
-    setting(Field::MenuFontPoints, "Menu text size", "", Kind::Stepper { step: 1, suffix: " pt" }),
+    setting(Field::MenuFontPoints, "Menu text size", "Both click menus", Kind::Stepper { step: 1, suffix: " pt" }),
     setting(Field::TextColor, "Colour", "", Kind::Swatches { auto_label: "A" }),
     setting(Field::SwapRows, "Download first", "Swaps the two speeds", Kind::Toggle),
     Row::ToggleSection { title: "Icons", field: Field::ShowIcons },
