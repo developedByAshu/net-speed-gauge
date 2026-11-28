@@ -83,14 +83,22 @@ impl Canvas {
             info.bmiHeader.biCompression = BI_RGB;
             let mut pixels = std::ptr::null_mut();
             let bitmap = CreateDIBSection(surface, &info, DIB_RGB_COLORS, &mut pixels, std::ptr::null_mut(), 0);
-            SelectObject(surface, bitmap);
             SetBkMode(surface, TRANSPARENT as i32);
+            if bitmap.is_null() || pixels.is_null() {
+                // Windows is out of drawing memory: an empty canvas, whose drawing does nothing, rather than a crash.
+                DeleteObject(bitmap);
+                return Self { surface, bitmap: std::ptr::null_mut(), pixels: std::ptr::null_mut(), width: 0, height: 0 };
+            }
+            SelectObject(surface, bitmap);
             Self { surface, bitmap, pixels: pixels.cast(), width, height }
         }
     }
 
     /// Returns the bitmap's pixels.
     fn pixels(&mut self) -> &mut [u32] {
+        if self.pixels.is_null() {
+            return &mut [];
+        }
         // SAFETY: Windows has finished its queued drawing after GdiFlush, and the bitmap holds
         // exactly width * height pixels for the life of self.
         unsafe {

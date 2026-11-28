@@ -202,8 +202,14 @@ impl Readout {
             info.bmiHeader.biCompression = BI_RGB;
             let mut pixels = std::ptr::null_mut();
             let bitmap = CreateDIBSection(surface, &info, DIB_RGB_COLORS, &mut pixels, std::ptr::null_mut(), 0);
-            SelectObject(surface, bitmap);
-            (bitmap, pixels.cast::<u32>())
+            if bitmap.is_null() || pixels.is_null() {
+                // Windows is out of drawing memory; draw() then skips until the next rebuild.
+                DeleteObject(bitmap);
+                (std::ptr::null_mut(), std::ptr::null_mut())
+            } else {
+                SelectObject(surface, bitmap);
+                (bitmap, pixels.cast::<u32>())
+            }
         };
         let row_step = row_height + row_gap;
         let value_right = width - SIDE_PADDING - box_padding;
@@ -223,6 +229,9 @@ impl Readout {
 
     /// Draws both rows and puts them on screen.
     pub fn draw(&self, up_text: &str, down_text: &str, colors: &ReadoutColors) {
+        if self.pixels.is_null() {
+            return;
+        }
         let pixel_count = (self.width * self.height) as usize;
         // SAFETY: the bitmap holds exactly width * height 32-bit pixels and lives as long as self.
         let pixels = unsafe {
