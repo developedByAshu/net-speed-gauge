@@ -252,3 +252,16 @@ fn history_choice_sets_how_long_usage_is_kept() {
     settings.set(Field::KeepHistory, 0);
     assert_eq!(settings.keep_days(), 93);
 }
+
+#[test]
+fn the_update_choice_and_the_last_check_survive_a_save() {
+    let mut settings = Settings::default();
+    assert_eq!(settings.get(Field::UpdateCheck), 1, "daily by default");
+    assert_eq!(settings.get(Field::LastUpdateCheck), 0, "never checked by default");
+    settings.set(Field::UpdateCheck, 3);
+    settings.set(Field::LastUpdateCheck, 1_795_000_000);
+    let loaded = Settings::from_text(&settings.to_text());
+    assert_eq!((loaded.get(Field::UpdateCheck), loaded.get(Field::LastUpdateCheck)), (3, 1_795_000_000));
+    settings.set(Field::UpdateCheck, 9);
+    assert_eq!(settings.get(Field::UpdateCheck), 4, "held to Never, the last choice");
+}
