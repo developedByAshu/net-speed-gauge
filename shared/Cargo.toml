@@ -9,3 +9,6 @@ repository.workspace = true
 [lib]
 name = "netspeedgauge_shared"
 path = "src/lib.rs"
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false }

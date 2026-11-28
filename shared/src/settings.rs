@@ -75,6 +75,8 @@ pub enum Field {
     ShowBackground,
     /// The right-click menu's text size. The readout's own size is FontPoints.
     MenuFontPoints,
+    UpdateCheck,
+    LastUpdateCheck,
 }
 
 /// What resting on or clicking the numbers does.
@@ -103,7 +105,7 @@ const fn spec(field: Field, key: &'static str, default: i64, min: i64, max: i64)
 
 const MAX_COLOR: i64 = 0xFF_FFFF;
 
-pub const FIELDS: [FieldSpec; 33] = [
+pub const FIELDS: [FieldSpec; 35] = [
     spec(Field::ArrowStyle, "arrow_style", 0, 0, ARROW_STYLES.len() as i64 - 1),
     spec(Field::IconThickness, "icon_thickness", 2, THINNEST_ICON, 4),
     spec(Field::FontFamily, "font_family", 0, 0, 3),
@@ -137,6 +139,10 @@ pub const FIELDS: [FieldSpec; 33] = [
     spec(Field::ShowIcons, "show_icons", 1, 0, 1),
     spec(Field::ShowBackground, "show_background", 0, 0, 1),
     spec(Field::MenuFontPoints, "menu_font_points", 9, 7, 12),
+    // 0 on launch, 1 daily, 2 weekly, 3 monthly, 4 never: shared update::UpdateCheck.
+    spec(Field::UpdateCheck, "update_check", 1, 0, 4),
+    // Seconds since 1970 of the last look for a release.
+    spec(Field::LastUpdateCheck, "last_update_check", 0, 0, i64::MAX),
 ];
 
 /// All the user's choices.
