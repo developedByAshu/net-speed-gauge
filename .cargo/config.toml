@@ -1,3 +1,5 @@
 # Link the C runtime into the exe so users never need a separate redistributable.
+# DEPENDENTLOADFLAG 0x800 makes Windows load the exe's DLLs from System32 only, never from its own
+# folder, so a DLL dropped next to the exe (such as in Downloads) is never loaded.
 [target.'cfg(all(windows, target_env = "msvc"))']
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/DEPENDENTLOADFLAG:0x800"]
