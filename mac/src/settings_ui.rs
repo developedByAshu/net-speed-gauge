@@ -18,8 +18,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 const WINDOW_TITLE: &str = "NetSpeedGauge Settings";
-const WIDTH: i32 = 680;
-const HEIGHT: i32 = 640;
+const WIDTH: i32 = 720;
+const HEIGHT: i32 = 720;
 const SIDEBAR_WIDTH: i32 = 176;
 const MARGIN: i32 = 20;
 const HEADER_HEIGHT: i32 = 62;

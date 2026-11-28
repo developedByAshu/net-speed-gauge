@@ -161,7 +161,7 @@ define_class!(
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             if self.ivars().surface == Surface::Settings {
-                settings_ui::on_scroll(event.scrollingDeltaY() as i32);
+                settings_ui::on_scroll(scroll_points(event));
             }
         }
 
@@ -542,3 +542,13 @@ pub fn capture_view(view: &NSView, path: &str) -> bool {
     data.writeToFile_atomically(&NSString::from_str(path), true)
 }
 
+
+/// How far one notch of a mouse wheel scrolls, in points. A wheel reports lines, about one per notch,
+/// while a trackpad reports points; read as points, a wheel crawled one point per notch.
+const WHEEL_LINE_POINTS: f64 = 18.0;
+
+/// Returns a scroll event's distance in points, for a trackpad and a mouse wheel alike.
+fn scroll_points(event: &NSEvent) -> i32 {
+    let delta = event.scrollingDeltaY();
+    (if event.hasPreciseScrollingDeltas() { delta } else { delta * WHEEL_LINE_POINTS }).round() as i32
+}
