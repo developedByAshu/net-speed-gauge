@@ -59,7 +59,7 @@ fn the_choice_survives_its_number_and_defaults_to_daily() {
     }
     assert_eq!(UpdateCheck::from_number(9), UpdateCheck::Daily);
     assert_eq!(UpdateCheck::default(), UpdateCheck::Daily);
-    assert_eq!(UPDATE_CHECK_LABELS, ["On launch", "Daily", "Weekly", "Monthly", "Never"]);
+    assert_eq!(UPDATE_CHECK_LABELS, ["Launch", "Daily", "Weekly", "Monthly", "Never"]);
 }
 
 #[test]

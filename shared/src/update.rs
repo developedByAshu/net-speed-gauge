@@ -19,7 +19,7 @@ pub enum UpdateCheck {
 }
 
 /// The row's options, in the order of `UpdateCheck`.
-pub const UPDATE_CHECK_LABELS: [&str; 5] = ["On launch", "Daily", "Weekly", "Monthly", "Never"];
+pub const UPDATE_CHECK_LABELS: [&str; 5] = ["Launch", "Daily", "Weekly", "Monthly", "Never"];
 
 impl UpdateCheck {
     /// Reads the number saved in settings.txt; anything unknown is Daily, the default.
