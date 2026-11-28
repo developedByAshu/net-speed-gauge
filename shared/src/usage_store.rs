@@ -205,7 +205,7 @@ impl UsageStore {
             let length = u16::from_le_bytes(reader.take(2)?.try_into().ok()?) as usize;
             let raw = reader.take(length * 2)?;
             let units: Vec<u16> =
-                raw.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+                raw.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
             store.adapters.push(AdapterName { luid, name: String::from_utf16_lossy(&units) });
         }
         for _ in 0..record_count {
