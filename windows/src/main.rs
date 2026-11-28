@@ -19,7 +19,8 @@ use netspeedgauge_windows::theme::{app_icon, set_icon_colors, set_theme_choice};
 use netspeedgauge_windows::usage_store::{catch_up_gap_secs, data_folder, UsageStore};
 use netspeedgauge_windows::usage_ui::{self, OpenedBy};
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::cell::Cell;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
@@ -102,8 +103,10 @@ struct App {
     timer_ms: u32,
     /// False until the first update timer fires, which is the "On launch" check.
     has_launch_check_run: bool,
-    /// A downloaded, checked update waiting for Settings to close.
-    waiting_update: Option<PathBuf>,
+    /// A downloaded, checked update and its tag, waiting for Settings to close and the user's yes.
+    waiting_update: Option<(PathBuf, String)>,
+    /// True after No, so the question waits for the next check.
+    is_update_declined: bool,
 }
 
 /// Returns the current time in seconds since 1970.
@@ -130,6 +133,8 @@ fn record_usage(usage: &mut UsageStore, luid: u64, up: u64, down: u64) {
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
     static WINDOW: RefCell<HWND> = const { RefCell::new(std::ptr::null_mut()) };
+    // True while the install question shows, so a message under it cannot ask a second time.
+    static IS_ASKING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Returns the text colour that suits the taskbar's light or dark theme.
@@ -388,32 +393,31 @@ impl App {
             (UpdateCheck::from_number(settings.get(Field::UpdateCheck)), u64::try_from(settings.get(Field::LastUpdateCheck)).unwrap_or(0))
         };
         if is_check_due(choice, last_check, updater::now_seconds(), is_launch) {
+            // A check that finds the update again asks again, even after No.
             updater::check_now(self.window);
         }
     }
 
     /**
-     * Takes a step of the update check: saves when GitHub answered, and swaps in a checked update
-     * once Settings is closed. Returns false when the app should quit for the new copy.
+     * Takes a step of the update check: saves when GitHub answered, and once Settings is closed
+     * returns the checked update to ask about. It never installs anything itself.
      */
-    fn on_update(&mut self) -> bool {
+    fn on_update(&mut self) -> Option<(PathBuf, String)> {
         if let Some(outcome) = updater::take_outcome() {
             if let Some(checked_at) = outcome.checked_at {
                 self.settings.borrow_mut().set(Field::LastUpdateCheck, i64::try_from(checked_at).unwrap_or(0));
                 self.settings.borrow().save();
             }
-            if outcome.new_copy.is_some() {
-                self.waiting_update = outcome.new_copy;
+            if let (Some(new_copy), Some(tag)) = (outcome.new_copy, outcome.tag) {
+                self.waiting_update = Some((new_copy, tag));
+                self.is_update_declined = false;
             }
         }
         settings_ui::refresh();
-        if settings_ui::is_open() {
-            return true;
+        if settings_ui::is_open() || self.is_update_declined {
+            return None;
         }
-        match self.waiting_update.take() {
-            Some(new_copy) => !updater::install(&new_copy),
-            None => true,
-        }
+        self.waiting_update.clone()
     }
 
     /// Asks Windows to report when the mouse rests on the readout or leaves it.
@@ -430,6 +434,29 @@ impl App {
         // SAFETY: `request` is valid for the duration of the call.
         unsafe { TrackMouseEvent(&mut request) };
         self.is_tracking_mouse = true;
+    }
+}
+
+/**
+ * Asks "NetSpeedGauge 1.4.0 is ready. Install now?" outside any app borrow, since the question runs
+ * its own message loop and the timers keep ticking under it. Yes swaps in the new copy and quits; No
+ * keeps the download and the next check asks again.
+ */
+fn offer_update(window: HWND, new_copy: &Path, tag: &str) {
+    if IS_ASKING.with(|cell| cell.replace(true)) {
+        return;
+    }
+    let is_yes = updater::ask_to_install(tag);
+    IS_ASKING.with(|cell| cell.set(false));
+    if !is_yes {
+        with_app(|app| app.is_update_declined = true);
+        return;
+    }
+    with_app(|app| app.waiting_update = None);
+    if updater::install(new_copy) {
+        // The new copy has started and waits for this one; quitting saves usage first.
+        // SAFETY: our own main window, destroyed on this thread.
+        unsafe { DestroyWindow(window) };
     }
 }
 
@@ -516,12 +543,12 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
     match message {
         WM_TIMER if wparam == UPDATE_TIMER => with_app(App::on_update_timer),
         WM_TIMER => with_app(App::tick),
+        // Any program on the desktop can post this, so it only ever leads to the question, never to an install.
         WM_APP_UPDATE => {
-            let mut keeps_running = true;
-            with_app(|app| keeps_running = app.on_update());
-            if !keeps_running {
-                // The new copy has started and waits for this one; quitting saves usage first.
-                DestroyWindow(window);
+            let mut waiting = None;
+            with_app(|app| waiting = app.on_update());
+            if let Some((new_copy, tag)) = waiting {
+                offer_update(window, &new_copy, &tag);
             }
         }
         WM_APP_RESYNC => with_app(App::sync_position),
@@ -698,6 +725,7 @@ fn main() {
             timer_ms,
             has_launch_check_run: false,
             waiting_update: None,
+            is_update_declined: false,
         };
         app.sync_position();
         APP.with(|cell| *cell.borrow_mut() = Some(app));
