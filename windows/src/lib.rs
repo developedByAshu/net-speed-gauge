@@ -1,4 +1,8 @@
 //! Logic behind the NetSpeedGauge taskbar readout.
+// Window, font and drawing handles are opaque numbers Windows hands out, never dereferenced here.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+// Drawing calls take a position, size and look; a struct per call would only hide that.
+#![allow(clippy::too_many_arguments)]
 
 pub use netspeedgauge_shared::{format, settings, usage_store};
 

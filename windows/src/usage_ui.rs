@@ -160,8 +160,8 @@ pub fn axis_label(period: Period, start: i32) -> String {
 pub fn shows_axis_label(period: Period, position: usize, count: usize) -> bool {
     let last = count - 1;
     match period {
-        Period::Day => (last - position) % 7 == 0,
-        Period::Week | Period::Month => (last - position) % 3 == 0,
+        Period::Day => (last - position).is_multiple_of(7),
+        Period::Week | Period::Month => (last - position).is_multiple_of(3),
         Period::Year => true,
     }
 }

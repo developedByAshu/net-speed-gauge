@@ -442,8 +442,11 @@ fn with_app(action: impl FnOnce(&mut App)) {
     });
 }
 
+/// The usage history and settings every window shares.
+type SharedState = (Rc<RefCell<UsageStore>>, Rc<RefCell<Settings>>);
+
 /// Returns the shared usage and settings. No app borrow is held once this returns.
-fn shared_state() -> Option<(Rc<RefCell<UsageStore>>, Rc<RefCell<Settings>>)> {
+fn shared_state() -> Option<SharedState> {
     let mut shared = None;
     with_app(|app| shared = Some((Rc::clone(&app.usage), Rc::clone(&app.settings))));
     shared
