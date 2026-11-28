@@ -24,7 +24,7 @@
     <td align="center" width="170"><h3>Under 4 MB</h3>RAM on Windows</td>
     <td align="center" width="170"><h3>14 MB</h3>RAM on Mac</td>
     <td align="center" width="170"><h3>411 KB</h3>Windows program, no install</td>
-    <td align="center" width="170"><h3>0</h3>internet connections</td>
+    <td align="center" width="170"><h3>1</h3>connection, to GitHub for updates</td>
   </tr>
 </table>
 
@@ -91,7 +91,7 @@ So this one counts every adapter, keeps 2 years of history, and stays out of the
 2. Put it in a folder you will keep, then run it.
 3. To open it at sign in, turn on **Start with Windows** in Settings.
 
-To update, choose **Exit**, then replace the old file with the new one. Your settings and usage stay as they are.
+Updates come from this page. NetSpeedGauge checks GitHub daily (choose how often in Settings, or **Never**), checks the new version's signature, and asks before installing it. To update by hand instead, choose **Exit**, then replace the old file with the new one. Your settings and usage stay as they are.
 
 Windows may show a SmartScreen warning because the program is not code signed yet. Choose **More info**, then **Run anyway**. `SHA256SUMS.txt` in each release lets you check the file.
 
@@ -104,7 +104,7 @@ To remove it, turn off **Start with Windows**, choose **Exit**, then delete the 
 3. macOS blocks it the first time because the app is not signed by Apple. Open **System Settings**, **Privacy & Security**, choose **Open Anyway**, then open it again.
 4. To open it at login, turn on **Start at login** in Settings.
 
-To update, choose **Quit**, then replace the old app with the new one. Your settings and usage stay as they are.
+Updates come from this page. NetSpeedGauge checks GitHub daily (choose how often in Settings, or **Never**), checks the new version's signature, and asks before installing it. To update by hand instead, choose **Quit**, then replace the old app with the new one. Your settings and usage stay as they are.
 
 To remove it, turn off **Start at login**, choose **Quit**, then delete the app and `~/Library/Application Support/NetSpeedGauge`.
 
@@ -116,8 +116,9 @@ On Windows it shows on the main taskbar only.
 
 ## Privacy
 
-- Nothing leaves your computer. No account, tracking, ads or server.
-- No network library in the program. It only reads your adapters' byte counts from the system.
+- The only connection is the update check to GitHub: daily by default, set in Settings, or **Never**. It always asks before installing.
+- That check sends only the app's name as the User-Agent. GitHub sees your IP address, as any website does. Nothing else leaves your computer: no account, tracking, ads or server of mine.
+- The speed itself comes from your adapters' byte counts, read from the system.
 - Usage and settings stay in `%APPDATA%\NetSpeedGauge` on Windows and `~/Library/Application Support/NetSpeedGauge` on Mac. They are not encrypted, they are just never sent anywhere.
 - The code is all here, so you can check it yourself or ask an AI to.
 
@@ -159,7 +160,7 @@ On Windows it shows on the main taskbar only.
 
 <details>
 <summary><b>Does it slow down my PC or use my data?</b></summary>
-<br>No data, because it never connects to the internet. For CPU and RAM, see the numbers above.
+<br>Almost no data: its only connection is the update check to GitHub, daily by default, which you can set to **Never** in Settings. For CPU and RAM, see the numbers above.
 </details>
 
 <details>
