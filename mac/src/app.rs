@@ -6,10 +6,11 @@ use crate::readout::{pair_texts, readout_colors, Readout, ReadoutColors};
 use crate::surface::{self, main_thread, GaugeView, Surface};
 use crate::theme::{is_dark_appearance, set_icon_colors, set_theme_choice};
 use crate::usage_ui::{self, OpenedBy};
-use crate::{popup_ui, settings_ui, startup};
+use crate::{popup_ui, settings_ui, startup, updater};
 use netspeedgauge_shared::format::SpeedFormat;
 use netspeedgauge_shared::net_counters::{Counter, DeltaTracker, InterfaceMode};
 use netspeedgauge_shared::settings::{Field, MeterAction, Settings};
+use netspeedgauge_shared::update::{is_check_due, UpdateCheck};
 use netspeedgauge_shared::usage_store::{catch_up_gap_secs, data_folder, UsageStore};
 use objc2::rc::Retained;
 use objc2::sel;
@@ -18,10 +19,14 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
 const SAVE_EVERY_SECONDS: f64 = 60.0;
+// The first look for an update waits, so it never slows startup; then it looks hourly whether one is due.
+const LAUNCH_CHECK_DELAY_SECONDS: f64 = 30.0;
+const UPDATE_RECHECK_SECONDS: f64 = 60.0 * 60.0;
 const HOVER_DELAY_SECONDS: f64 = 0.45;
 const IDLE_TICKS: u32 = 10;
 const IDLE_SLOWDOWN: u32 = 2;
@@ -46,6 +51,8 @@ pub enum Command {
     CloseUsage,
     CloseSettings,
     SettingsChanged,
+    /// Settings closed, so an update waiting for it goes in now.
+    UpdateStep,
 }
 
 thread_local! {
@@ -77,6 +84,10 @@ struct App {
     timer_ms: u32,
     timer: Option<Retained<NSTimer>>,
     hover_timer: Option<Retained<NSTimer>>,
+    /// False until the first update timer fires, which is the "On launch" check.
+    has_launch_check_run: bool,
+    /// A downloaded, checked update waiting for Settings to close.
+    waiting_update: Option<PathBuf>,
 }
 
 fn with_app(action: impl FnOnce(&mut App)) {
@@ -116,6 +127,7 @@ fn run_command(command: Command) {
         Command::CloseUsage => usage_ui::close(),
         Command::CloseSettings => settings_ui::close(),
         Command::SettingsChanged => with_app(App::apply_settings),
+        Command::UpdateStep => on_update(),
     }
 }
 
@@ -190,6 +202,8 @@ impl App {
             timer_ms,
             timer: None,
             hover_timer: None,
+            has_launch_check_run: false,
+            waiting_update: None,
         }
     }
 
@@ -488,10 +502,61 @@ pub fn on_appearance_change() {
     popup_ui::sync_system_menu_look();
 }
 
-/// Runs one timer tick.
+/// Runs one timer tick, and picks up a step of the update check that finished since the last one.
 pub fn on_tick() {
     surface::release_closed_windows();
     with_app(App::tick);
+    if updater::take_new_step() {
+        on_update();
+    }
+}
+
+/// Looks for an update when the chosen interval says one is due. The first run is the launch check.
+pub fn on_update_timer() {
+    let mut is_due = false;
+    with_app(|app| {
+        let is_launch = !app.has_launch_check_run;
+        if is_launch {
+            app.has_launch_check_run = true;
+            // The one-shot launch timer has fired; the hourly one takes over.
+            surface::start_timer(UPDATE_RECHECK_SECONDS, sel!(updateTimer:), true);
+        }
+        let settings = app.settings.borrow();
+        let choice = UpdateCheck::from_number(settings.get(Field::UpdateCheck));
+        let last_check = u64::try_from(settings.get(Field::LastUpdateCheck)).unwrap_or(0);
+        is_due = is_check_due(choice, last_check, updater::now_seconds(), is_launch);
+    });
+    if is_due {
+        updater::check_now();
+    }
+}
+
+/**
+ * Takes a step of the update check: saves when GitHub answered, and swaps in a checked update once
+ * Settings is closed. The app then quits, and the install script opens the new copy.
+ */
+fn on_update() {
+    if let Some(outcome) = updater::take_outcome() {
+        with_app(|app| {
+            if let Some(checked_at) = outcome.checked_at {
+                app.settings.borrow_mut().set(Field::LastUpdateCheck, i64::try_from(checked_at).unwrap_or(0));
+                app.settings.borrow().save();
+            }
+            if outcome.new_copy.is_some() {
+                app.waiting_update = outcome.new_copy;
+            }
+        });
+    }
+    settings_ui::refresh();
+    if settings_ui::is_open() {
+        return;
+    }
+    let mut new_copy = None;
+    with_app(|app| new_copy = app.waiting_update.take());
+    if new_copy.is_some_and(|new_copy| updater::install(&new_copy)) {
+        // Quitting the normal way saves usage first.
+        NSApplication::sharedApplication(main_thread()).terminate(None);
+    }
 }
 
 /// Saves usage now, ahead of the Mac sleeping or the app quitting.
@@ -544,6 +609,7 @@ pub fn finish_startup() {
         app.redraw();
     });
     surface::watch_for_sleep();
+    surface::start_timer(LAUNCH_CHECK_DELAY_SECONDS, sel!(updateTimer:), false);
     start_capture_if_asked();
 }
 

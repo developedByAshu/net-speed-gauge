@@ -7,7 +7,9 @@ use crate::readout::{pair_texts, readout_colors, Readout};
 use crate::startup;
 use crate::surface::{self, GaugeView, Surface, KEY_ESCAPE, WINDOW_LEVEL_FLOATING, WINDOW_LEVEL_NORMAL};
 use crate::theme::{apply_title_bar, current_theme, dark_theme, draw_made_with_love, light_theme, set_theme_choice, Theme};
+use crate::updater;
 use netspeedgauge_shared::settings::{Field, Settings, COLOR_AUTO, FIELDS, PALETTE};
+use netspeedgauge_shared::update::{status_text, UPDATE_CHECK_LABELS};
 use objc2::rc::Retained;
 use objc2::sel;
 use objc2_app_kit::NSWindow;
@@ -43,6 +45,9 @@ const NAV_TOP: i32 = 62;
 const NAV_ROW: i32 = 40;
 // Space each side of a segment's text. The system font runs wider than Windows', so this is tighter than there.
 const SEGMENT_PADDING: i32 = 8;
+// Five options leave the label too little room at that padding, so they sit closer, as on Windows.
+const COMPACT_SEGMENT_PADDING: i32 = 5;
+const COMPACT_SEGMENT_COUNT: usize = 5;
 const CONTROL_SPACE: i32 = 8;
 const STEPPER_WIDTH: i32 = 136;
 const SWATCH_ROW_WIDTH: i32 = 270;
@@ -70,7 +75,7 @@ const PAGES: [(&str, &str); 6] = [
 
 /// What NetSpeedGauge does and does not do with data, shown on the Details page.
 const PRIVACY_LINES: [&str; 4] = [
-    "Nothing leaves this Mac. It never connects to the internet.",
+    "Only connects to GitHub to check for updates. Nothing about you is sent.",
     "It only reads your network adapters' byte counts from macOS.",
     "Your usage and settings are stored only on this computer.",
     "No account, no tracking, no ads and no servers.",
@@ -99,6 +104,7 @@ enum Row {
     Preview,
     Setting { field: Field, label: &'static str, hint: &'static str, kind: Kind },
     StartAtLogin,
+    CheckNow,
     AdapterList,
     Note(&'static str),
     ResetPage,
@@ -150,9 +156,12 @@ const UNITS_ROWS: &[Row] = &[
 const GENERAL_ROWS: &[Row] = &[
     Row::Section("Startup"),
     Row::StartAtLogin,
-    Row::Section("Updates"),
+    Row::Section("Refresh"),
     setting(Field::UpdateRate, "Update every", "", Kind::Segments(&["0.5 s", "1 s", "2 s", "5 s"])),
     setting(Field::SmartUpdates, "Slow down when idle", "Uses less power when nothing is moving", Kind::Toggle),
+    Row::Section("Updates"),
+    setting(Field::UpdateCheck, "Check for updates", "", Kind::Segments(&UPDATE_CHECK_LABELS)),
+    Row::CheckNow,
 ];
 
 const NETWORK_ROWS: &[Row] = &[
@@ -208,6 +217,7 @@ enum Action {
     Page(usize),
     Set(Field, i64),
     ToggleStartAtLogin,
+    CheckNow,
     ToggleAdapter(u64),
     ResetPage,
     ResetAll,
@@ -462,6 +472,12 @@ impl SettingsWindow {
                 self.add_hit(left, y, width, ROW_HEIGHT, Action::ToggleStartAtLogin);
                 next
             }
+            Row::CheckNow => {
+                let last_checked = updater::time_label(u64::try_from(self.settings.borrow().get(Field::LastUpdateCheck)).unwrap_or(0));
+                let hint = status_text(&updater::status(), env!("CARGO_PKG_VERSION"), last_checked.as_deref());
+                self.draw_button_row(left, y, width, "Check now", &hint, "Check now", Action::CheckNow);
+                next
+            }
             Row::AdapterList => self.draw_adapter_list(left, y, width),
             Row::Note(text) => {
                 let (first, second) = split_note(text);
@@ -603,7 +619,8 @@ impl SettingsWindow {
 
     fn draw_segments(&mut self, field: Field, options: &'static [&'static str], right: i32, y: i32, value: i64) {
         let theme = self.theme;
-        let widths: Vec<i32> = options.iter().map(|option| canvas::text_width(option, &self.fonts.strong) + SEGMENT_PADDING * 2).collect();
+        let padding = segment_padding(options.len());
+        let widths: Vec<i32> = options.iter().map(|option| canvas::text_width(option, &self.fonts.strong) + padding * 2).collect();
         let total: i32 = widths.iter().sum();
         let (height, top) = (32, y + 9);
         let mut x = right - total;
@@ -736,6 +753,10 @@ impl SettingsWindow {
                 startup::set_enabled(!startup::is_enabled());
                 self.invalidate();
             }
+            Action::CheckNow => {
+                updater::check_now();
+                self.invalidate();
+            }
             Action::ToggleAdapter(luid) => {
                 {
                     let mut settings = self.settings.borrow_mut();
@@ -766,7 +787,8 @@ impl SettingsWindow {
                 {
                     let mut settings = self.settings.borrow_mut();
                     if reset == Action::ResetAll {
-                        FIELDS.iter().for_each(|spec| settings.reset(spec.field));
+                        // When updates were last checked is a record, not a choice, so it stays.
+                        FIELDS.iter().filter(|spec| spec.field != Field::LastUpdateCheck).for_each(|spec| settings.reset(spec.field));
                         settings.chosen_adapters.clear();
                     } else {
                         for field in page_fields(APPEARANCE_PAGE).into_iter().chain(page_fields(UNITS_PAGE)) {
@@ -898,7 +920,19 @@ pub fn on_window_closed(window: &NSWindow) {
     if let Some(state) = closed {
         surface::hold_closed_window(state.window.clone());
         app::sync_dock_entry();
+        // An update downloaded while Settings was open goes in now.
+        app::post(Command::UpdateStep);
     }
+}
+
+/// Redraws the open window, so the Check now row shows the update check's latest step.
+pub fn refresh() {
+    with_window(|state| state.invalidate());
+}
+
+/// Returns the space each side of a segment's text for a choice with this many options.
+fn segment_padding(option_count: usize) -> i32 {
+    if option_count >= COMPACT_SEGMENT_COUNT { COMPACT_SEGMENT_PADDING } else { SEGMENT_PADDING }
 }
 
 /// Returns true while the window is open.
@@ -1042,7 +1076,7 @@ pub fn rows_that_do_not_fit() -> Vec<String> {
                 Kind::Stepper { .. } => STEPPER_WIDTH,
                 Kind::Swatches { .. } => SWATCH_ROW_WIDTH,
                 Kind::Segments(options) => {
-                    options.iter().map(|option| canvas::text_width(option, &fonts.strong) + SEGMENT_PADDING * 2).sum()
+                    options.iter().map(|option| canvas::text_width(option, &fonts.strong) + segment_padding(options.len()) * 2).sum()
                 }
             };
             let text = canvas::text_width(label, &fonts.body).max(canvas::text_width(hint, &fonts.small));

@@ -336,6 +336,11 @@ define_class!(
             app::on_tick();
         }
 
+        #[unsafe(method(updateTimer:))]
+        fn update_timer(&self, _timer: &NSTimer) {
+            app::on_update_timer();
+        }
+
         #[unsafe(method(hoverFired:))]
         fn hover_fired(&self, _timer: &NSTimer) {
             app::on_hover_fired();

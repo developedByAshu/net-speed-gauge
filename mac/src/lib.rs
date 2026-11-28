@@ -11,4 +11,5 @@ pub mod settings_ui;
 pub mod startup;
 pub mod surface;
 pub mod theme;
+pub mod updater;
 pub mod usage_ui;
