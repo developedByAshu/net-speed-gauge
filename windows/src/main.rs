@@ -3,6 +3,7 @@
 #![windows_subsystem = "windows"]
 
 use netspeedgauge_windows::calendar;
+use netspeedgauge_windows::disk_writer;
 use netspeedgauge_windows::format::{format_speed, SpeedFormat};
 use netspeedgauge_windows::net_counters::{list_adapters, read_counters, Counter, DeltaTracker, InterfaceMode};
 use netspeedgauge_windows::popup_ui;
@@ -22,7 +23,8 @@ use std::cell::RefCell;
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
     GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM,
 };
@@ -64,6 +66,8 @@ const UPDATE_RECHECK_MS: u32 = 60 * 60 * 1000;
 const TICK_TOLERANCE_MS: u32 = 100;
 const WM_APP_RESYNC: u32 = WM_APP + 1;
 const SAVE_EVERY_SECONDS: f64 = 60.0;
+// How long quitting waits for the last writes to reach the disk.
+const FINAL_WRITE_WAIT: Duration = Duration::from_secs(5);
 const HOVER_DELAY_MS: u32 = 450;
 // With no traffic for this many readings, smart updates slow the readout down.
 const IDLE_TICKS: u32 = 10;
@@ -108,6 +112,9 @@ struct App {
     /// True after No, so the question waits for the next check.
     is_update_declined: bool,
 }
+
+// Set by the writer thread when a usage save failed, so the next save tries again.
+static USAGE_SAVE_FAILED: AtomicBool = AtomicBool::new(false);
 
 /// Returns the current time in seconds since 1970.
 fn unix_now() -> i64 {
@@ -339,10 +346,16 @@ impl App {
         self.sync_position();
     }
 
-    /// Saves usage if anything changed, along with the counters that let the next start catch up.
+    /**
+     * Saves usage if anything changed, along with the counters that let the next start catch up. The
+     * write itself runs on the writer thread, so a slow disk never stalls the taskbar.
+     */
     fn save_usage(&mut self) {
         self.last_save = Instant::now();
         let mut usage = self.usage.borrow_mut();
+        if USAGE_SAVE_FAILED.swap(false, Ordering::SeqCst) {
+            usage.is_dirty = true;
+        }
         if !usage.is_dirty {
             return;
         }
@@ -350,9 +363,13 @@ impl App {
         usage.baseline.clone_from(&self.counters);
         usage.saved_unix = unix_now();
         usage.boot_unix = boot_time();
-        if usage.save_to(&data_folder()).is_ok() {
-            usage.is_dirty = false;
-        }
+        usage.is_dirty = false;
+        let snapshot = usage.clone();
+        disk_writer::queue(move || {
+            if snapshot.save_to(&data_folder()).is_err() {
+                USAGE_SAVE_FAILED.store(true, Ordering::SeqCst);
+            }
+        });
     }
 
     /// Follows a change between the light and dark theme.
@@ -406,7 +423,8 @@ impl App {
         if let Some(outcome) = updater::take_outcome() {
             if let Some(checked_at) = outcome.checked_at {
                 self.settings.borrow_mut().set(Field::LastUpdateCheck, i64::try_from(checked_at).unwrap_or(0));
-                self.settings.borrow().save();
+                let settings = self.settings.borrow().clone();
+                disk_writer::queue(move || settings.save());
             }
             if let (Some(new_copy), Some(tag)) = (outcome.new_copy, outcome.tag) {
                 self.waiting_update = Some((new_copy, tag));
@@ -582,7 +600,14 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
             });
             popup_ui::hide_hover_card();
         }
-        WM_POWERBROADCAST | WM_ENDSESSION => with_app(App::save_usage),
+        WM_POWERBROADCAST => with_app(App::save_usage),
+        WM_ENDSESSION => {
+            with_app(App::save_usage);
+            // Windows may end the process once this returns, so the save has to land first.
+            if wparam != 0 {
+                disk_writer::wait_for_writes(FINAL_WRITE_WAIT);
+            }
+        }
         WM_QUERYENDSESSION => {
             with_app(App::save_usage);
             return 1;
@@ -750,4 +775,6 @@ fn main() {
             DispatchMessageW(&message);
         }
     }
+    // The window is gone; let the last usage and settings writes finish before the program ends.
+    disk_writer::wait_for_writes(FINAL_WRITE_WAIT);
 }

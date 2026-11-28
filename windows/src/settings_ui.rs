@@ -1,6 +1,7 @@
 //! The Settings window. It exists only while open, then frees its memory. Changes apply at once.
 
 use crate::canvas::{create_font, mix, Align, Canvas};
+use crate::disk_writer;
 use crate::format::format_speed;
 use crate::net_counters::list_adapters;
 use crate::messages::{WM_APP_SETTINGS_CHANGED, WM_APP_UPDATE};
@@ -855,9 +856,10 @@ impl SettingsWindow {
         unsafe { InvalidateRect(self.window, std::ptr::null(), 0) };
     }
 
-    /// Saves the choices and tells the app to apply them at once.
+    /// Saves the choices, on the writer thread so the taskbar never waits on the disk, and tells the app to apply them at once.
     fn commit(&mut self) {
-        self.settings.borrow().save();
+        let settings = self.settings.borrow().clone();
+        disk_writer::queue(move || settings.save());
         self.fonts = Fonts::new(self.dpi, &self.settings.borrow());
         set_theme_choice(self.settings.borrow().get(Field::WindowTheme));
         self.theme = current_theme();

@@ -8,6 +8,7 @@ pub use netspeedgauge_shared::{format, settings, usage_store};
 
 pub mod calendar;
 pub mod canvas;
+pub mod disk_writer;
 pub mod messages;
 pub mod net_counters;
 pub mod popup_ui;
