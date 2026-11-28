@@ -13,10 +13,10 @@ Build the Swift tools once: `swiftc -O input.swift -o input` and `swiftc -O wind
 
 ## An update test
 
-1. `./update_check.sh backup JuiceBar /tmp/jb-backup`
+1. `./update_check.sh backup NetSpeedGauge /tmp/nsg-backup`
 2. Take a screenshot of the menu bar to compare the icon order afterwards.
 3. Open Settings > General, click **Check now**, wait for "Updates to X when Settings closes", close Settings.
-4. `./update_check.sh verify JuiceBar 0.1.2 /tmp/jb-backup`
+4. `./update_check.sh verify NetSpeedGauge 1.3.1 /tmp/nsg-backup`
 5. Open every Settings page and both clicks on the icon, then take the menu bar screenshot again.
 
 ## Gotchas

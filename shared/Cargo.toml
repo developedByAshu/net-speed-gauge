@@ -13,3 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 ed25519-dalek = { version = "2", default-features = false }
 sha2 = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+# Signs test messages, so the signature check is tested with good and bad signatures.
+ed25519-dalek = { version = "2", default-features = false }

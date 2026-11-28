@@ -2,7 +2,7 @@
 # the version, every Settings page, the tray or readout clicks and their popups, and the tray place.
 # Clicks are window messages posted to the app, so the real pointer and keyboard are never touched.
 # The settings file is compared with its backup at the end and put back byte for byte if it changed.
-# Usage: pwsh windows/tools/release_update_test.ps1 -App JuiceBar -Tag v0.1.2 -Backup <folder holding the settings backup>
+# Usage: pwsh windows/tools/release_update_test.ps1 -App NetSpeedGauge -Tag v1.3.1 -Backup <folder holding the settings backup>
 param(
     [Parameter(Mandatory)][ValidateSet('JuiceBar', 'NetSpeedGauge')][string]$App,
     [Parameter(Mandatory)][string]$Tag,

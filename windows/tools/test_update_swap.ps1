@@ -2,7 +2,7 @@
 # launch check find the real GitHub release, and checks that the copy was swapped for the release
 # file with the published sha256. The installed app is stopped for the run and started again after;
 # its settings file is backed up first and put back byte for byte at the end.
-# Usage: pwsh windows/tools/test_update_swap.ps1 -Program JuiceBar -Repo juice-bar -DataFile JuiceBar\settings.txt -OldBuild <path to an older-version exe>
+# Usage: pwsh windows/tools/test_update_swap.ps1 -Program NetSpeedGauge -Repo net-speed-gauge -DataFile NetSpeedGauge\settings.ini -OldBuild <path to an older-version exe>
 param(
     [Parameter(Mandatory)][string]$Program,
     [Parameter(Mandatory)][string]$Repo,
