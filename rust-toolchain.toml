@@ -1,0 +1,4 @@
+[toolchain]
+# The stable release the apps are built and tested with, the same locally and in the release workflow.
+channel = "1.99.1"
+components = ["clippy"]
