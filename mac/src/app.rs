@@ -642,12 +642,15 @@ pub fn finish_startup() {
 
 // Capture mode opens the right-click menu rather than the card.
 static CAPTURE_WANTS_MENU: AtomicBool = AtomicBool::new(false);
+#[cfg(debug_assertions)]
 const CAPTURE_OPEN_SECONDS: f64 = 2.0;
+#[cfg(debug_assertions)]
 const CAPTURE_FINISH_SECONDS: f64 = 5.0;
 
 /// Capture mode, for checking the real menu window without touching the mouse: NETSPEEDGAUGE_CAPTURE=menu or
 /// card pops that popup from the menu bar item as the Mac shows it, writes NETSPEEDGAUGE_CAPTURE_PATH, logs the
-/// window's width against the drawn view's, and quits.
+/// window's width against the drawn view's, and quits. Debug builds only, so a release ignores the switch.
+#[cfg(debug_assertions)]
 fn start_capture_if_asked() {
     let wanted = std::env::var("NETSPEEDGAUGE_CAPTURE").unwrap_or_default();
     if wanted != "menu" && wanted != "card" {
@@ -658,6 +661,9 @@ fn start_capture_if_asked() {
     surface::start_timer(CAPTURE_FINISH_SECONDS, sel!(captureFinish:), false);
 }
 
+#[cfg(not(debug_assertions))]
+fn start_capture_if_asked() {}
+
 /// Pops the Mac's own menu from the menu bar item. Used only by capture mode.
 pub fn capture_open() {
     open_item_menu();
@@ -665,8 +671,8 @@ pub fn capture_open() {
 
 /// Writes the open popup's window to a PNG, logs its sizes, closes it and quits. Used only by capture mode.
 pub fn capture_finish() {
-    let path = std::env::var("NETSPEEDGAUGE_CAPTURE_PATH").unwrap_or_default();
-    popup_ui::capture_live_window(&path);
+    #[cfg(debug_assertions)]
+    popup_ui::capture_live_window(&std::env::var("NETSPEEDGAUGE_CAPTURE_PATH").unwrap_or_default());
     popup_ui::close();
     NSApplication::sharedApplication(main_thread()).terminate(None);
 }
