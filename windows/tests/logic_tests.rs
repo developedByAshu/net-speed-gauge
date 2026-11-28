@@ -3,6 +3,7 @@
 use netspeedgauge_windows::canvas::round_rect_coverage;
 use netspeedgauge_windows::net_counters::is_physical;
 use netspeedgauge_windows::popup_ui::{slide_in_offset, slide_out_offset};
+use netspeedgauge_windows::settings_ui::wheel_pixels;
 use netspeedgauge_windows::readout::{arrow_column_left, selected_colors, tint_pixel, ReadoutColors};
 use netspeedgauge_windows::startup::startup_command;
 use netspeedgauge_windows::taskbar_dock::{covers_monitor, is_taskbar_collapsed, place_readout, to_taskbar_coords};
@@ -169,4 +170,24 @@ fn slide_out_ends_fully_down_and_speeds_up_as_it_leaves() {
     assert_eq!(slide_out_offset(0.0), 0.0);
     assert_eq!(slide_out_offset(160.0), 1.0);
     assert!(slide_out_offset(80.0) < 0.5);
+}
+
+#[test]
+fn a_mouse_notch_scrolls_one_step_as_before() {
+    assert_eq!(wheel_pixels(0, 120, 72), (72, 0));
+    assert_eq!(wheel_pixels(0, -240, 72), (-144, 0));
+}
+
+#[test]
+fn small_touchpad_moves_add_up_to_the_same_distance() {
+    let (mut moved, mut rest) = (0, 0);
+    for _ in 0..15 {
+        let (pixels, left) = wheel_pixels(rest, 8, 72);
+        moved += pixels;
+        rest = left;
+    }
+    assert_eq!((moved, rest), (72, 0), "fifteen moves of 8 make one notch of 120");
+    let (back, rest) = wheel_pixels(0, 3, 72);
+    assert_eq!((back, rest), (1, 96), "a tiny move still scrolls a pixel and keeps the rest");
+    assert_eq!(wheel_pixels(rest, -3, 72), (-1, 0), "moving back the same amount cancels out");
 }

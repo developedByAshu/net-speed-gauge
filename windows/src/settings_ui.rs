@@ -329,6 +329,8 @@ struct SettingsWindow {
     /// The reset just done, whose row shows a green line for a few seconds.
     reset_done: Option<Action>,
     is_tracking_mouse: bool,
+    /// Wheel movement too small to scroll a pixel yet, kept for the next event.
+    wheel_rest: i32,
 }
 
 thread_local! {
@@ -960,12 +962,24 @@ impl SettingsWindow {
         }
     }
 
-    fn on_wheel(&mut self, notches: i32) {
+    /// Scrolls by how far the wheel or touchpad moved; a touchpad's small steps add up instead of being lost.
+    fn on_wheel(&mut self, delta: i32) {
         let view = self.px(HEIGHT) - self.px(HEADER_HEIGHT);
         let limit = (self.content_height - view).max(0);
-        self.scroll = (self.scroll - notches * self.px(SCROLL_STEP)).clamp(0, limit);
+        let (pixels, rest) = wheel_pixels(self.wheel_rest, delta, self.px(SCROLL_STEP));
+        self.wheel_rest = rest;
+        self.scroll = (self.scroll - pixels).clamp(0, limit);
         self.invalidate();
     }
+}
+
+/**
+ * Turns a wheel event into pixels to scroll, with what is left over for the next one. A mouse notch is
+ * 120 and moves step; a touchpad sends many smaller amounts, which add up to the same distance.
+ */
+pub fn wheel_pixels(rest: i32, delta: i32, step: i32) -> (i32, i32) {
+    let total = rest + delta * step;
+    (total / WHEEL_NOTCH, total % WHEEL_NOTCH)
 }
 
 /// Returns a reset's card title and its two lines of detail, the Mac app's words.
@@ -1015,8 +1029,8 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
             0
         }
         WM_MOUSEWHEEL => {
-            let notches = i32::from((wparam >> 16) as u16 as i16) / WHEEL_NOTCH;
-            with_window(|state| state.on_wheel(notches));
+            let delta = i32::from((wparam >> 16) as u16 as i16);
+            with_window(|state| state.on_wheel(delta));
             0
         }
         WM_SETCURSOR if (lparam & 0xFFFF) as u32 == HTCLIENT => {
@@ -1187,6 +1201,7 @@ pub fn open(settings: Rc<RefCell<Settings>>, anchor: HWND, keep_on_top: bool) {
             confirming: None,
             reset_done: None,
             is_tracking_mouse: false,
+            wheel_rest: 0,
         };
         apply_title_bar(window, &state.theme);
         OPEN_WINDOW.with(|cell| *cell.borrow_mut() = Some(state));
