@@ -188,3 +188,5 @@ On a Mac with Apple silicon you need Rust and the Xcode command line tools. This
 ## Licence
 
 [GPL-3.0](LICENSE)
+
+<!-- README reviewed 28 Nov 2026 -->
