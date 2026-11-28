@@ -86,8 +86,10 @@ struct App {
     hover_timer: Option<Retained<NSTimer>>,
     /// False until the first update timer fires, which is the "On launch" check.
     has_launch_check_run: bool,
-    /// A downloaded, checked update waiting for Settings to close.
-    waiting_update: Option<PathBuf>,
+    /// A downloaded, checked update and its tag, waiting for Settings to close and the user's yes.
+    waiting_update: Option<(PathBuf, String)>,
+    /// True after Later, so the question waits for the next check.
+    is_update_declined: bool,
 }
 
 fn with_app(action: impl FnOnce(&mut App)) {
@@ -204,6 +206,7 @@ impl App {
             hover_timer: None,
             has_launch_check_run: false,
             waiting_update: None,
+            is_update_declined: false,
         }
     }
 
@@ -527,13 +530,17 @@ pub fn on_update_timer() {
         is_due = is_check_due(choice, last_check, updater::now_seconds(), is_launch);
     });
     if is_due {
+        // A check that finds the update again asks again, even after Later.
         updater::check_now();
     }
 }
 
+// True while the install question shows, so a tick during it cannot ask a second time.
+static IS_ASKING: AtomicBool = AtomicBool::new(false);
+
 /**
- * Takes a step of the update check: saves when GitHub answered, and swaps in a checked update once
- * Settings is closed. The app then quits, and the install script opens the new copy.
+ * Takes a step of the update check: saves when GitHub answered, and once Settings is closed asks
+ * before a checked update goes in. Nothing installs without the user's Install.
  */
 fn on_update() {
     if let Some(outcome) = updater::take_outcome() {
@@ -542,8 +549,9 @@ fn on_update() {
                 app.settings.borrow_mut().set(Field::LastUpdateCheck, i64::try_from(checked_at).unwrap_or(0));
                 app.settings.borrow().save();
             }
-            if outcome.new_copy.is_some() {
-                app.waiting_update = outcome.new_copy;
+            if let (Some(new_copy), Some(tag)) = (outcome.new_copy, outcome.tag) {
+                app.waiting_update = Some((new_copy, tag));
+                app.is_update_declined = false;
             }
         });
     }
@@ -551,9 +559,28 @@ fn on_update() {
     if settings_ui::is_open() {
         return;
     }
-    let mut new_copy = None;
-    with_app(|app| new_copy = app.waiting_update.take());
-    if new_copy.is_some_and(|new_copy| updater::install(&new_copy)) {
+    offer_update();
+}
+
+/**
+ * Asks "NetSpeedGauge 1.4.0 is ready. Install now?". Install swaps it in and quits, and the install
+ * script opens the new copy; Later keeps the download and the next check asks again.
+ */
+fn offer_update() {
+    let mut waiting = None;
+    with_app(|app| waiting = if app.is_update_declined { None } else { app.waiting_update.clone() });
+    let Some((new_copy, tag)) = waiting else { return };
+    if IS_ASKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let is_yes = updater::ask_to_install(&tag);
+    IS_ASKING.store(false, Ordering::SeqCst);
+    if !is_yes {
+        with_app(|app| app.is_update_declined = true);
+        return;
+    }
+    with_app(|app| app.waiting_update = None);
+    if updater::install(&new_copy) {
         // Quitting the normal way saves usage first.
         NSApplication::sharedApplication(main_thread()).terminate(None);
     }
