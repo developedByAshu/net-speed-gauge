@@ -1,11 +1,15 @@
 //! Check for updates on Windows. A background thread asks GitHub for the latest release over
-//! WinHTTP, downloads the program and SHA256SUMS.txt, checks the sha256 and leaves the new copy
-//! next to the running one. The UI thread then swaps the two and starts the new copy, which waits
-//! for this one to exit. Nothing about the user is sent: only the app's name, as the User-Agent.
+//! WinHTTP, downloads SHA256SUMS.txt and its signature, checks the signature against the release
+//! key, then downloads the program, checks its sha256 and leaves the new copy next to the running
+//! one. The UI thread asks first and, on Yes, swaps the two and starts the new copy, which waits for
+//! this one to exit. Nothing about the user is sent: only the app's name, as the User-Agent.
 
 use crate::messages::WM_APP_UPDATE;
 use crate::taskbar_dock::to_wide;
-use netspeedgauge_shared::update::{asset_url, expected_sha, is_newer, is_sha_match, latest_release_url, release_tag, user_agent, windows_asset_name, UpdateStatus};
+use netspeedgauge_shared::update::{
+    asset_url, expected_sha, install_question, is_allowed_url, is_newer, is_sha_match, is_signature_valid, latest_release_url, release_tag,
+    signature_url, user_agent, windows_asset_name, UpdateStatus,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,13 +17,13 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HWND, SYSTEMTIME};
 use windows_sys::Win32::Networking::WinHttp::{
-    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData,
-    WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts, INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-    WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpQueryOption,
+    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts, INTERNET_DEFAULT_HTTPS_PORT,
+    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_URL, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
 use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, PostMessageW, IDYES, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO};
 
 /// The program's name in the release files and the User-Agent.
 const PROGRAM_NAME: &str = "NetSpeedGauge";
@@ -28,6 +32,8 @@ const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const SUMS_NAME: &str = "SHA256SUMS.txt";
 const RELEASE_ACCEPT: &str = "application/vnd.github+json";
 const FILE_ACCEPT: &str = "application/octet-stream";
+// The release answer must come from the GitHub API itself.
+const API_PREFIX: &str = "https://api.github.com/";
 /// The new copy starts with this and the old copy's process id, and waits for it to exit.
 const AFTER_UPDATE_ARGUMENT: &str = "--after-update=";
 const OLD_COPY_WAIT_MS: u32 = 15_000;
@@ -35,6 +41,8 @@ const TIMEOUT_MS: i32 = 15_000;
 const HTTP_OK: u32 = 200;
 // Far above either program's size, so a broken answer cannot fill the disk.
 const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
+// Room for the longest address GitHub's file store redirects to, in UTF-16 units.
+const URL_BUFFER_LENGTH: usize = 4096;
 // Seconds from 1601, where Windows' clock starts, to 1970.
 const WINDOWS_EPOCH_OFFSET: u64 = 11_644_473_600;
 const TICKS_PER_SECOND: u64 = 10_000_000;
@@ -46,6 +54,8 @@ pub struct Outcome {
     pub checked_at: Option<u64>,
     /// The checked new copy waiting next to the running program.
     pub new_copy: Option<PathBuf>,
+    /// The new copy's release tag, such as "v1.4.0", for the question before it goes in.
+    pub tag: Option<String>,
 }
 
 static STATUS: Mutex<UpdateStatus> = Mutex::new(UpdateStatus::Idle);
@@ -92,28 +102,36 @@ pub fn check_now(window: HWND) {
 /// Asks GitHub for the latest release and, when it is newer, downloads and checks it.
 fn run_check(window: isize) -> (UpdateStatus, Outcome) {
     let agent = user_agent(PROGRAM_NAME);
-    let unreachable = (UpdateStatus::Failed, Outcome { checked_at: None, new_copy: None });
-    let Some(json) = latest_release_url(REPOSITORY).and_then(|url| fetch(&url, &agent, RELEASE_ACCEPT)).and_then(|body| String::from_utf8(body).ok()) else {
+    let unreachable = (UpdateStatus::Failed, Outcome { checked_at: None, new_copy: None, tag: None });
+    let Some(json) = latest_release_url(REPOSITORY).and_then(|url| fetch(&url, &agent, RELEASE_ACCEPT, |final_url| final_url.starts_with(API_PREFIX))).and_then(|body| String::from_utf8(body).ok()) else {
         return unreachable;
     };
-    let checked = Outcome { checked_at: Some(now_seconds()), new_copy: None };
+    let checked = Outcome { checked_at: Some(now_seconds()), new_copy: None, tag: None };
     let Some(tag) = release_tag(&json) else { return (UpdateStatus::Failed, checked) };
     if !is_newer(VERSION, &tag) {
         return (UpdateStatus::UpToDate, checked);
     }
     set_status(window, UpdateStatus::Downloading(tag.clone()));
-    match download_checked(&json, &agent).and_then(|program| write_new_copy(&program)) {
-        Some(new_copy) => (UpdateStatus::Ready(tag), Outcome { new_copy: Some(new_copy), ..checked }),
+    match download_checked(&json, &tag, &agent).and_then(|program| write_new_copy(&program)) {
+        Some(new_copy) => (UpdateStatus::Ready(tag.clone()), Outcome { new_copy: Some(new_copy), tag: Some(tag), ..checked }),
         None => (UpdateStatus::Failed, checked),
     }
 }
 
-/// Downloads this machine's program and keeps it only when its sha256 matches SHA256SUMS.txt and it is a Windows program.
-fn download_checked(json: &str, agent: &str) -> Option<Vec<u8>> {
+/**
+ * Downloads SHA256SUMS.txt and its signature, and only when the signature is the release key's
+ * downloads this machine's program, keeping it when its sha256 matches the signed sums and it is a
+ * Windows program. A missing or wrong signature means no update; the next check tries again.
+ */
+fn download_checked(json: &str, tag: &str, agent: &str) -> Option<Vec<u8>> {
     let asset = windows_asset_name(PROGRAM_NAME, cfg!(target_arch = "aarch64"));
-    let sums = fetch(&asset_url(json, SUMS_NAME)?, agent, FILE_ACCEPT).and_then(|body| String::from_utf8(body).ok())?;
-    let expected = expected_sha(&sums, &asset)?;
-    let program = fetch(&asset_url(json, &asset)?, agent, FILE_ACCEPT)?;
+    let sums = download(&asset_url(json, SUMS_NAME)?, agent)?;
+    let signature = download(&signature_url(REPOSITORY, tag)?, agent).and_then(|body| String::from_utf8(body).ok())?;
+    if !is_signature_valid(&sums, &signature) {
+        return None;
+    }
+    let expected = expected_sha(std::str::from_utf8(&sums).ok()?, &asset)?;
+    let program = download(&asset_url(json, &asset)?, agent)?;
     // Every Windows program starts with "MZ"; anything else is not one, whatever its name.
     (is_sha_match(&program, &expected) && program.starts_with(b"MZ")).then_some(program)
 }
@@ -128,6 +146,14 @@ fn write_new_copy(program: &[u8]) -> Option<PathBuf> {
     let new_copy = sibling(&std::env::current_exe().ok()?, "new");
     std::fs::write(&new_copy, program).ok()?;
     Some(new_copy)
+}
+
+/// Asks "NetSpeedGauge 1.4.0 is ready. Install now?" and returns true for Yes. No asks again at the next check.
+pub fn ask_to_install(tag: &str) -> bool {
+    let text = to_wide(&format!("{}\n\nYes installs it and restarts NetSpeedGauge. No asks again at the next check.", install_question(PROGRAM_NAME, tag)));
+    let caption = to_wide(PROGRAM_NAME);
+    // SAFETY: both strings are null-terminated and outlive the call; no owner window, so it stands alone.
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST) == IDYES }
 }
 
 /**
@@ -205,8 +231,17 @@ impl Drop for Handle {
     }
 }
 
-/// GETs an https address and returns the body of a 200 answer. WinHTTP follows GitHub's redirect to its file store.
-fn fetch(url: &str, agent: &str, accept: &str) -> Option<Vec<u8>> {
+/// Downloads a release file, but only from the owner's GitHub pages or GitHub's file stores, wherever it redirects.
+fn download(url: &str, agent: &str) -> Option<Vec<u8>> {
+    is_allowed_url(url).then(|| fetch(url, agent, FILE_ACCEPT, is_allowed_url)).flatten()
+}
+
+/**
+ * GETs an https address and returns the body of a 200 answer. WinHTTP follows GitHub's redirect to
+ * its file store, never from https to http, and the answer counts only when `is_final_url_ok`
+ * accepts the address it finally came from.
+ */
+fn fetch(url: &str, agent: &str, accept: &str, is_final_url_ok: impl Fn(&str) -> bool) -> Option<Vec<u8>> {
     let rest = url.strip_prefix("https://")?;
     let (host, path) = rest.split_once('/').map_or((rest, "/".to_string()), |(host, path)| (host, format!("/{path}")));
     let (agent, host, path, verb) = (to_wide(agent), to_wide(host), to_wide(&path), to_wide("GET"));
@@ -224,6 +259,15 @@ fn fetch(url: &str, agent: &str, accept: &str) -> Option<Vec<u8>> {
         }
         let request = Handle(WinHttpOpenRequest(connection.0, verb.as_ptr(), path.as_ptr(), std::ptr::null(), std::ptr::null(), std::ptr::null(), WINHTTP_FLAG_SECURE));
         if request.0.is_null() || WinHttpSendRequest(request.0, headers.as_ptr(), u32::MAX, std::ptr::null(), 0, 0, 0) == 0 || WinHttpReceiveResponse(request.0, std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let mut final_url = vec![0u16; URL_BUFFER_LENGTH];
+        let mut url_bytes = (URL_BUFFER_LENGTH * 2) as u32;
+        if WinHttpQueryOption(request.0, WINHTTP_OPTION_URL, final_url.as_mut_ptr().cast(), &mut url_bytes) == 0 {
+            return None;
+        }
+        final_url.truncate((url_bytes as usize / 2).min(URL_BUFFER_LENGTH));
+        if !is_final_url_ok(String::from_utf16_lossy(&final_url).trim_end_matches('\0')) {
             return None;
         }
         let mut code = 0u32;
