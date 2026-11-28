@@ -7,7 +7,9 @@ use netspeedgauge_windows::format::{format_speed, SpeedFormat};
 use netspeedgauge_windows::net_counters::{list_adapters, read_counters, Counter, DeltaTracker, InterfaceMode};
 use netspeedgauge_windows::popup_ui;
 use netspeedgauge_windows::readout::{selected_colors, Readout, ReadoutColors};
-use netspeedgauge_windows::messages::{WM_APP_EXIT, WM_APP_OPEN_SETTINGS, WM_APP_OPEN_USAGE, WM_APP_POPUP_CHANGED, WM_APP_SETTINGS_CHANGED};
+use netspeedgauge_windows::messages::{WM_APP_EXIT, WM_APP_OPEN_SETTINGS, WM_APP_OPEN_USAGE, WM_APP_POPUP_CHANGED, WM_APP_SETTINGS_CHANGED, WM_APP_UPDATE};
+use netspeedgauge_windows::updater;
+use netspeedgauge_shared::update::{is_check_due, UpdateCheck};
 use netspeedgauge_windows::settings::{Field, MeterAction, Settings};
 use netspeedgauge_windows::settings_ui::{self, speed_color};
 use netspeedgauge_windows::taskbar_dock::{
@@ -17,6 +19,7 @@ use netspeedgauge_windows::theme::{app_icon, set_icon_colors, set_theme_choice};
 use netspeedgauge_windows::usage_store::{catch_up_gap_secs, data_folder, UsageStore};
 use netspeedgauge_windows::usage_ui::{self, OpenedBy};
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
@@ -36,7 +39,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, IsWindow, LoadCursorW,
-    PostMessageW, PostQuitMessage, RegisterClassW, SetCoalescableTimer, SetWindowPos, ShowWindow,
+    PostMessageW, PostQuitMessage, RegisterClassW, SetCoalescableTimer, SetTimer, SetWindowPos, ShowWindow,
     TranslateMessage, EVENT_SYSTEM_FOREGROUND, HWND_TOP, IDC_ARROW, MA_NOACTIVATE, MSG, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
     WM_APP, WM_DESTROY, WM_ENDSESSION, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_POWERBROADCAST, WM_QUERYENDSESSION,
@@ -52,6 +55,11 @@ const SINGLE_INSTANCE_NAME: &str = "Local\\NetSpeedGaugeSingleInstance";
 const WINDOW_CLASS_NAME: &str = "NetSpeedGaugeReadout";
 const METER_CLASS_NAME: &str = "NetSpeedGaugeMeter";
 const TIMER_ID: usize = 1;
+/// Fires once LAUNCH_CHECK_DELAY_MS after launch, then hourly, to see whether an update check is due.
+const UPDATE_TIMER: usize = 2;
+// The first look waits, so it never slows startup.
+const LAUNCH_CHECK_DELAY_MS: u32 = 30_000;
+const UPDATE_RECHECK_MS: u32 = 60 * 60 * 1000;
 const TICK_TOLERANCE_MS: u32 = 100;
 const WM_APP_RESYNC: u32 = WM_APP + 1;
 const SAVE_EVERY_SECONDS: f64 = 60.0;
@@ -92,6 +100,10 @@ struct App {
     usage: Rc<RefCell<UsageStore>>,
     idle_ticks: u32,
     timer_ms: u32,
+    /// False until the first update timer fires, which is the "On launch" check.
+    has_launch_check_run: bool,
+    /// A downloaded, checked update waiting for Settings to close.
+    waiting_update: Option<PathBuf>,
 }
 
 /// Returns the current time in seconds since 1970.
@@ -363,6 +375,47 @@ impl App {
         usage_ui::apply_theme();
     }
 
+    /// Looks for an update when the chosen interval says one is due. The first run is the launch check.
+    fn on_update_timer(&mut self) {
+        let is_launch = !self.has_launch_check_run;
+        if is_launch {
+            self.has_launch_check_run = true;
+            // SAFETY: replaces the one-shot launch timer on our own window with the hourly one.
+            unsafe { SetTimer(self.window, UPDATE_TIMER, UPDATE_RECHECK_MS, None) };
+        }
+        let (choice, last_check) = {
+            let settings = self.settings.borrow();
+            (UpdateCheck::from_number(settings.get(Field::UpdateCheck)), u64::try_from(settings.get(Field::LastUpdateCheck)).unwrap_or(0))
+        };
+        if is_check_due(choice, last_check, updater::now_seconds(), is_launch) {
+            updater::check_now(self.window);
+        }
+    }
+
+    /**
+     * Takes a step of the update check: saves when GitHub answered, and swaps in a checked update
+     * once Settings is closed. Returns false when the app should quit for the new copy.
+     */
+    fn on_update(&mut self) -> bool {
+        if let Some(outcome) = updater::take_outcome() {
+            if let Some(checked_at) = outcome.checked_at {
+                self.settings.borrow_mut().set(Field::LastUpdateCheck, i64::try_from(checked_at).unwrap_or(0));
+                self.settings.borrow().save();
+            }
+            if outcome.new_copy.is_some() {
+                self.waiting_update = outcome.new_copy;
+            }
+        }
+        settings_ui::refresh();
+        if settings_ui::is_open() {
+            return true;
+        }
+        match self.waiting_update.take() {
+            Some(new_copy) => !updater::install(&new_copy),
+            None => true,
+        }
+    }
+
     /// Asks Windows to report when the mouse rests on the readout or leaves it.
     fn track_mouse(&mut self) {
         if self.is_tracking_mouse {
@@ -458,7 +511,16 @@ fn run_click_action(window: HWND) {
 /// Handles the window's messages.
 unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
+        WM_TIMER if wparam == UPDATE_TIMER => with_app(App::on_update_timer),
         WM_TIMER => with_app(App::tick),
+        WM_APP_UPDATE => {
+            let mut keeps_running = true;
+            with_app(|app| keeps_running = app.on_update());
+            if !keeps_running {
+                // The new copy has started and waits for this one; quitting saves usage first.
+                DestroyWindow(window);
+            }
+        }
         WM_APP_RESYNC => with_app(App::sync_position),
         WM_SETTINGCHANGE => with_app(App::refresh_color),
         WM_RBUTTONUP => {
@@ -538,6 +600,8 @@ fn main() {
     let instance_name = to_wide(SINGLE_INSTANCE_NAME);
     let class_name = to_wide(WINDOW_CLASS_NAME);
     let title = to_wide("NetSpeedGauge");
+    // After an update, wait for the old copy to quit first, so the one-copy check below lets this one in.
+    updater::finish_update();
     // SAFETY: Win32 setup on the main thread. All strings outlive the calls that read them.
     unsafe {
         let _instance_guard = CreateMutexW(std::ptr::null(), 0, instance_name.as_ptr());
@@ -629,11 +693,14 @@ fn main() {
             usage: Rc::new(RefCell::new(usage)),
             idle_ticks: 0,
             timer_ms,
+            has_launch_check_run: false,
+            waiting_update: None,
         };
         app.sync_position();
         APP.with(|cell| *cell.borrow_mut() = Some(app));
 
         SetCoalescableTimer(window, TIMER_ID, timer_ms, None, TICK_TOLERANCE_MS);
+        SetTimer(window, UPDATE_TIMER, LAUNCH_CHECK_DELAY_MS, None);
         SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
             EVENT_SYSTEM_FOREGROUND,

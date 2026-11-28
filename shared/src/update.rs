@@ -149,7 +149,19 @@ pub enum UpdateStatus {
     Checking,
     UpToDate,
     Downloading(String),
+    /// The new copy is downloaded and checked; it goes in when the Settings window closes.
+    Ready(String),
     Failed,
+}
+
+/// Returns a Windows release file's name, as release.yml writes it: "JuiceBar-x64.exe" or "JuiceBar-arm64.exe".
+pub fn windows_asset_name(program_name: &str, is_arm: bool) -> String {
+    format!("{program_name}-{}.exe", if is_arm { "arm64" } else { "x64" })
+}
+
+/// Returns the Mac release file's name, as release.yml writes it: "JuiceBar-mac-arm64.zip".
+pub fn mac_asset_name(program_name: &str) -> String {
+    format!("{program_name}-mac-arm64.zip")
 }
 
 /**
@@ -162,6 +174,7 @@ pub fn status_text(status: &UpdateStatus, current_version: &str, last_checked: O
         UpdateStatus::Checking => "Checking...".to_string(),
         UpdateStatus::UpToDate => format!("Up to date ({current_version})"),
         UpdateStatus::Downloading(version) => format!("Downloading {}...", version.trim_start_matches(['v', 'V'])),
+        UpdateStatus::Ready(version) => format!("Updates to {} when Settings closes", version.trim_start_matches(['v', 'V'])),
         UpdateStatus::Failed => "Could not reach GitHub".to_string(),
     }
 }

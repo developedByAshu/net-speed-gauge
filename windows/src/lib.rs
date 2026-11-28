@@ -12,4 +12,5 @@ pub mod settings_ui;
 pub mod startup;
 pub mod taskbar_dock;
 pub mod theme;
+pub mod updater;
 pub mod usage_ui;

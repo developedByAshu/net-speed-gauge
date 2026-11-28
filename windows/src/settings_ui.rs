@@ -3,11 +3,13 @@
 use crate::canvas::{create_font, mix, Align, Canvas};
 use crate::format::format_speed;
 use crate::net_counters::list_adapters;
-use crate::messages::WM_APP_SETTINGS_CHANGED;
+use crate::messages::{WM_APP_SETTINGS_CHANGED, WM_APP_UPDATE};
 use crate::settings::{Field, Settings, COLOR_AUTO, FIELDS, PALETTE};
 pub use netspeedgauge_shared::settings::speed_color;
 use crate::startup;
 use crate::taskbar_dock::to_wide;
+use crate::updater;
+use netspeedgauge_shared::update::{status_text, UPDATE_CHECK_LABELS};
 use crate::readout::arrow_column_left;
 use crate::theme::{
     app_icon, apply_title_bar, current_theme, dark_theme, draw_made_with_love, light_theme, set_theme_choice, Theme,
@@ -92,13 +94,16 @@ const PAGES: [(&str, &str); 6] = [
 
 /// What NetSpeedGauge does and does not do with data, shown on the Details page.
 const PRIVACY_LINES: [&str; 4] = [
-    "Nothing leaves this PC. NetSpeedGauge never connects to the internet.",
+    "Only connects to GitHub to check for updates. Nothing about you is sent.",
     "It only reads your network adapters' byte counts from Windows.",
     "Your usage and settings are stored only on this computer.",
     "No account, no tracking, no ads and no servers.",
 ];
 
 const APP_NAME: &str = "NetSpeedGauge";
+const SEGMENT_PAD: i32 = 13;
+const COMPACT_SEGMENT_PAD: i32 = 8;
+const COMPACT_SEGMENT_COUNT: usize = 5;
 const APP_TAGLINE: &str = "A tiny network speed monitor for the Windows taskbar.";
 const DEVELOPER_NAME: &str = "Ashutosh Anand";
 const DEVELOPER_ORIGIN: &str = "From India";
@@ -123,6 +128,7 @@ enum Row {
     Preview,
     Setting { field: Field, label: &'static str, hint: &'static str, kind: Kind },
     StartWithWindows,
+    CheckNow,
     AdapterList,
     Note(&'static str),
     ResetPage,
@@ -175,12 +181,15 @@ const UNITS_ROWS: &[Row] = &[
 const GENERAL_ROWS: &[Row] = &[
     Row::Section("Startup"),
     Row::StartWithWindows,
-    Row::Section("Updates"),
+    Row::Section("Refresh"),
     setting(Field::UpdateRate, "Update every", "", Kind::Segments(&["0.5 s", "1 s", "2 s", "5 s"])),
     setting(Field::SmartUpdates, "Slow down when idle", "Uses less power when nothing is moving", Kind::Toggle),
     Row::Section("Position"),
     setting(Field::OffsetX, "Move left or right", "", Kind::Stepper { step: 4, suffix: " px" }),
     setting(Field::OffsetY, "Move up or down", "", Kind::Stepper { step: 1, suffix: " px" }),
+    Row::Section("Updates"),
+    setting(Field::UpdateCheck, "Check for updates", "", Kind::Segments(&UPDATE_CHECK_LABELS)),
+    Row::CheckNow,
 ];
 
 const NETWORK_ROWS: &[Row] = &[
@@ -242,6 +251,7 @@ enum Action {
     Page(usize),
     Set(Field, i64),
     ToggleStartWithWindows,
+    CheckNow,
     ToggleAdapter(u64),
     ResetPage,
     ResetAll,
@@ -558,6 +568,12 @@ impl SettingsWindow {
                 self.add_hit(left, y, width, row_height, Action::ToggleStartWithWindows);
                 next
             }
+            Row::CheckNow => {
+                let last_checked = updater::time_label(u64::try_from(self.settings.borrow().get(Field::LastUpdateCheck)).unwrap_or(0));
+                let hint = status_text(&updater::status(), env!("CARGO_PKG_VERSION"), last_checked.as_deref());
+                self.draw_button_row(left, y, width, "Check now", &hint, "Check now", Action::CheckNow);
+                next
+            }
             Row::AdapterList => self.draw_adapter_list(left, y, width),
             Row::Note(text) => {
                 let text_y = y + self.px(2);
@@ -723,7 +739,8 @@ impl SettingsWindow {
 
     fn draw_segments(&mut self, field: Field, options: &'static [&'static str], right: i32, y: i32, value: i64) {
         let theme = self.theme;
-        let pad = self.px(13);
+        // Five options leave the label too little room at the usual padding, so they sit closer.
+        let pad = self.px(if options.len() >= COMPACT_SEGMENT_COUNT { COMPACT_SEGMENT_PAD } else { SEGMENT_PAD });
         let widths: Vec<i32> = options.iter().map(|option| self.canvas.text_width(option, self.fonts.body) + pad * 2).collect();
         let total: i32 = widths.iter().sum();
         let (height, top) = (self.px(32), y + self.px(9));
@@ -868,6 +885,10 @@ impl SettingsWindow {
                 startup::set_enabled(!startup::is_enabled());
                 self.invalidate();
             }
+            Action::CheckNow => {
+                updater::check_now(self.anchor);
+                self.invalidate();
+            }
             Action::ToggleAdapter(luid) => {
                 {
                     let mut settings = self.settings.borrow_mut();
@@ -894,7 +915,8 @@ impl SettingsWindow {
                 {
                     let mut settings = self.settings.borrow_mut();
                     if reset == Action::ResetAll {
-                        FIELDS.iter().for_each(|spec| settings.reset(spec.field));
+                        // When updates were last checked is a record, not a choice, so it stays.
+                        FIELDS.iter().filter(|spec| spec.field != Field::LastUpdateCheck).for_each(|spec| settings.reset(spec.field));
                         settings.chosen_adapters.clear();
                     } else {
                         for field in page_fields(APPEARANCE_PAGE).into_iter().chain(page_fields(UNITS_PAGE)) {
@@ -1051,11 +1073,11 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
             0
         }
         WM_DESTROY => {
-            OPEN_WINDOW.with(|cell| {
-                if let Ok(mut state) = cell.try_borrow_mut() {
-                    state.take();
-                }
-            });
+            let closed = OPEN_WINDOW.with(|cell| cell.try_borrow_mut().ok().and_then(|mut state| state.take()));
+            if let Some(state) = closed {
+                // An update downloaded while Settings was open goes in now.
+                PostMessageW(state.anchor, WM_APP_UPDATE, 0, 0);
+            }
             SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
             0
         }
@@ -1070,6 +1092,16 @@ pub fn preview_theme(is_dark: bool) {
         apply_title_bar(state.window, &state.theme);
         state.invalidate();
     });
+}
+
+/// Returns true while Settings is open; an update waits for it to close.
+pub fn is_open() -> bool {
+    OPEN_WINDOW.with(|cell| cell.try_borrow().map_or(true, |state| state.is_some()))
+}
+
+/// Redraws the open window, so the Check now row shows the update check's latest step.
+pub fn refresh() {
+    with_window(|state| state.invalidate());
 }
 
 /// Closes the window, if it is open.
